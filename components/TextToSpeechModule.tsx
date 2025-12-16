@@ -1,5 +1,5 @@
 import React, { useState, useRef, DragEvent, useEffect } from 'react';
-import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins } from 'lucide-react';
+import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass } from 'lucide-react';
 import { VOICES_ES, VOICES_EN, MAX_CHARS_PER_CHUNK, UI_TEXT, SAMPLE_RATE } from '../constants';
 import { VoiceOption, GenerationSettings, Language, ProjectSection, InternalChunk } from '../types';
 import VoiceCard from './VoiceCard';
@@ -50,7 +50,8 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     pitch: 0,
     speed: 1.0,
     dialogueMode: false,
-    autoOptimize: false
+    autoOptimize: false,
+    isPaid: false
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -308,17 +309,24 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                   });
               }
               
-              // Throttling: Aggressive wait time to avoid 429
-              // Base wait: 12 seconds
+              // Throttling Logic
+              // If Paid Key (Turbo Mode) is enabled, we skip the waiting time (use 100ms just to breathe)
+              // If Free Mode (default), we wait 12s.
               let waitTime = 12000; 
-              if (settings.autoOptimize) waitTime += 8000; 
+              if (settings.isPaid) {
+                  waitTime = 100;
+              } else {
+                  if (settings.autoOptimize) waitTime += 8000; 
+              }
               
               // Only wait if it's not the last chunk
               if (i < totalParts - 1) {
-                  setSections(prev => prev.map(s => s.id === sectionId ? { 
-                      ...s, 
-                      currentStep: language === 'es' ? `Enfriando API... (${Math.round(waitTime/1000)}s)` : `Cooling down API... (${Math.round(waitTime/1000)}s)`
-                  } : s));
+                  if (waitTime > 1000) {
+                       setSections(prev => prev.map(s => s.id === sectionId ? { 
+                          ...s, 
+                          currentStep: language === 'es' ? `Enfriando API... (${Math.round(waitTime/1000)}s)` : `Cooling down API... (${Math.round(waitTime/1000)}s)`
+                      } : s));
+                  }
                   await new Promise(r => setTimeout(r, waitTime));
               }
           }
@@ -346,8 +354,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
           const genTimeSec = (endTime - startTime) / 1000;
           
           // Calculate Audio Duration from Blob Size (WAV)
-          // Duration = (Size - Header) / (SampleRate * Channels * BytesPerSample)
-          // 24kHz, 1 Channel, 16bit (2 bytes)
           let audioDurationSec = 0;
           if (finalBlob) {
              const headerSize = 44;
@@ -414,14 +420,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   const totalChars = sections.reduce((acc, curr) => acc + curr.charCount, 0);
   const totalEstimatedMins = sections.reduce((acc, curr) => acc + curr.estimatedDuration, 0);
   
-  // Cost Estimation for Gemini 1.5 Flash (Paid Tier)
-  // Input: $0.075 / 1 Million Tokens
-  // Output: $0.30 / 1 Million Tokens
-  // Approx conversion: 1 token = 4 chars.
-  // Input Tokens = Chars / 4.
-  // Output Tokens = Chars / 4 (Rough estimate for speech tokens, usually slightly more but this is safe)
-  // Total Cost = (InputTokens/1M * 0.075) + (OutputTokens/1M * 0.30)
-  // Simplified: (Chars/4/1M) * (0.075 + 0.30) = (Chars / 4,000,000) * 0.375
   const estimatedCost = (totalChars / 4000000) * 0.375; 
 
   return (
@@ -613,6 +611,23 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                          ))}
                      </div>
 
+                     {/* Turbo Mode Switch */}
+                     <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-800 flex items-start gap-3">
+                        <button 
+                            onClick={() => setSettings(s => ({...s, isPaid: !s.isPaid}))}
+                            className={`shrink-0 w-10 h-6 rounded-full relative transition-colors mt-0.5 ${settings.isPaid ? 'bg-amber-500' : 'bg-slate-700'}`}
+                        >
+                            <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${settings.isPaid ? 'translate-x-4' : 'translate-x-0'}`}></div>
+                        </button>
+                        <div>
+                            <div className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                                <Rocket size={14} className={settings.isPaid ? 'text-amber-400' : 'text-slate-500'} />
+                                {t.paidModeTitle}
+                            </div>
+                            <p className="text-xs text-slate-400 leading-tight mt-1">{t.paidModeDesc}</p>
+                        </div>
+                     </div>
+
                      {/* Sliders for Pitch and Speed */}
                      <div className="space-y-4 pt-2">
                         {/* Speed Slider */}
@@ -682,152 +697,177 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                           <p className="text-sm">{language === 'es' ? 'No hay documentos detectados' : 'No documents detected'}</p>
                       </div>
                   ) : (
-                      sections.map((section) => (
-                          <div 
-                            key={section.id} 
-                            className={`rounded-xl border transition-all overflow-hidden ${section.status === 'completed' ? 'bg-slate-900/80 border-slate-700' : 'bg-slate-800/40 border-slate-700/50'}`}
-                          >
-                              {/* HEADER */}
-                              <div className="p-4 flex items-center gap-4">
-                                  <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${section.status === 'completed' ? 'bg-green-500/20 text-green-400' : (section.status === 'generating' || section.status === 'merging' ? 'bg-amber-500/20 text-amber-400' : (section.status === 'paused' ? 'bg-yellow-500/20 text-yellow-400' : (section.status === 'error' ? 'bg-red-500/20 text-red-400' : 'bg-slate-700 text-slate-400')))}`}>
-                                      {section.status === 'generating' || section.status === 'merging' ? <Loader2 size={20} className="animate-spin" /> : 
-                                       section.status === 'paused' ? <Pause size={20} /> :
-                                       section.status === 'completed' ? <CheckCircle2 size={20} /> : 
-                                       section.status === 'error' ? <AlertCircle size={20} /> : <FileAudio size={20} />}
-                                  </div>
-                                  
-                                  <div className="flex-1 min-w-0">
-                                      <h4 className="font-semibold text-slate-200 truncate">{section.title}</h4>
-                                      <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
-                                          {section.status === 'completed' && section.actualDuration !== undefined ? (
-                                              <>
-                                                  <span className={`flex items-center gap-1 font-bold ${language === 'es' ? 'text-indigo-300' : 'text-emerald-300'}`}>
-                                                      <Clock size={10} /> {formatTime(section.actualDuration)}
-                                                  </span>
-                                                  <span>•</span>
-                                                  <span className="flex items-center gap-1" title={language === 'es' ? 'Tiempo de generación' : 'Generation time'}>
-                                                      <Timer size={10} /> {section.generationTime?.toFixed(1)}s
-                                                  </span>
-                                              </>
-                                          ) : (
-                                              <span className="flex items-center gap-1"><Clock size={10} /> ~{formatTime(section.estimatedDuration * 60)}</span>
-                                          )}
-                                          <span>•</span>
-                                          <span>{Math.round(section.charCount / 1000)}k chars</span>
+                      sections.map((section) => {
+                          // --- ESTIMATION LOGIC ---
+                          // 1. Audio Duration: ~16 chars per second (Average speaking rate)
+                          const estAudioDurationSec = Math.ceil(section.charCount / 16);
+                          
+                          // 2. Generation Wait Time
+                          // Chunks needed
+                          const chunksCount = Math.ceil(section.charCount / MAX_CHARS_PER_CHUNK);
+                          // Paid: ~2.5s per chunk (Processing + Network)
+                          // Free: ~14s per chunk (12s Wait + 2s Processing)
+                          const estGenWaitSec = settings.isPaid ? (chunksCount * 2.5) : (chunksCount * 14);
+
+                          return (
+                              <div 
+                                key={section.id} 
+                                className={`rounded-xl border transition-all overflow-hidden ${section.status === 'completed' ? 'bg-slate-900/80 border-slate-700' : 'bg-slate-800/40 border-slate-700/50'}`}
+                              >
+                                  {/* HEADER */}
+                                  <div className="p-4 flex items-center gap-4">
+                                      <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${section.status === 'completed' ? 'bg-green-500/20 text-green-400' : (section.status === 'generating' || section.status === 'merging' ? 'bg-amber-500/20 text-amber-400' : (section.status === 'paused' ? 'bg-yellow-500/20 text-yellow-400' : (section.status === 'error' ? 'bg-red-500/20 text-red-400' : 'bg-slate-700 text-slate-400')))}`}>
+                                          {section.status === 'generating' || section.status === 'merging' ? <Loader2 size={20} className="animate-spin" /> : 
+                                           section.status === 'paused' ? <Pause size={20} /> :
+                                           section.status === 'completed' ? <CheckCircle2 size={20} /> : 
+                                           section.status === 'error' ? <AlertCircle size={20} /> : <FileAudio size={20} />}
                                       </div>
-                                  </div>
-
-                                  {/* Action Buttons */}
-                                  <div className="flex items-center gap-2">
-                                    {/* Edit Button - Allowed unless generating */}
-                                    {section.status !== 'generating' && section.status !== 'merging' && (
-                                        <button 
-                                            onClick={() => handleOpenEdit(section)}
-                                            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg border border-slate-700 transition-colors"
-                                            title={language === 'es' ? 'Editar texto' : 'Edit text'}
-                                        >
-                                            <Edit2 size={16} />
-                                        </button>
-                                    )}
-
-                                    {section.status === 'idle' || section.status === 'error' ? (
-                                        <button 
-                                            onClick={() => handleGenerateClick(section.id)}
-                                            className={`px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 flex items-center gap-2 ${themeBg} hover:opacity-90`}
-                                        >
-                                            <Zap size={16} fill="currentColor" /> {t.generateBtn}
-                                        </button>
-                                    ) : section.status === 'generating' || section.status === 'paused' ? (
-                                        <>
-                                            {section.status === 'generating' ? (
-                                                <button onClick={() => handlePause(section.id)} className="p-2 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg border border-slate-600">
-                                                    <Pause size={18} fill="currentColor" />
-                                                </button>
-                                            ) : (
-                                                <button onClick={() => handleResume(section.id)} className="p-2 bg-slate-800 hover:bg-slate-700 text-green-400 rounded-lg border border-slate-600">
-                                                    <Play size={18} fill="currentColor" />
-                                                </button>
-                                            )}
-                                            <button onClick={() => handleCancel(section.id)} className="p-2 bg-slate-800 hover:bg-red-900/30 text-red-400 rounded-lg border border-slate-600">
-                                                <Square size={18} fill="currentColor" />
-                                            </button>
-                                        </>
-                                    ) : section.status === 'completed' ? (
-                                        <>
-                                            <button onClick={() => section.audioUrl && onSendToPlayer(section.audioUrl, section.title, section.blob)} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg border border-slate-600">
-                                                <PlayCircle size={20} />
-                                            </button>
-                                            <button onClick={() => handleDeleteSection(section.id)} className="p-2 hover:bg-red-900/30 text-slate-500 hover:text-red-400 rounded-lg">
-                                                <Trash2 size={18} />
-                                            </button>
-                                        </>
-                                    ) : null}
-                                  </div>
-                              </div>
-
-                              {/* PROGRESS BAR */}
-                              {(section.status === 'generating' || section.status === 'merging' || section.status === 'paused') && (
-                                  <div className="px-4 pb-4">
-                                      <div className="flex justify-between text-xs text-slate-400 mb-1">
-                                          <span>{section.status === 'paused' ? (language === 'es' ? 'Pausado' : 'Paused') : section.currentStep}</span>
-                                          <span>{section.progress}%</span>
-                                      </div>
-                                      <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                                          <div 
-                                            className={`h-full transition-all duration-300 ${section.status === 'paused' ? 'bg-yellow-500' : themeBg}`} 
-                                            style={{ width: `${section.progress}%` }}
-                                          ></div>
-                                      </div>
-                                  </div>
-                              )}
-
-                              {/* RESULT: SINGLE PLAYER */}
-                              {section.status === 'completed' && !section.isMultiPart && section.audioUrl && (
-                                  <div className="bg-black/20 p-3 border-t border-slate-800">
-                                      <AudioPlayer 
-                                        chunk={{
-                                            id: section.id,
-                                            index: 0,
-                                            text: 'Full Audio',
-                                            title: section.title,
-                                            charCount: section.charCount,
-                                            estimatedDurationSec: section.estimatedDuration * 60,
-                                            estimatedGenTimeSec: 0,
-                                            status: 'success',
-                                            downloaded: false,
-                                            audioUrl: section.audioUrl,
-                                            blob: section.blob
-                                        }}
-                                        onDownload={()=>{}}
-                                        language={language}
-                                      />
-                                  </div>
-                              )}
-
-                              {/* RESULT: MULTI PARTS */}
-                              {section.status === 'completed' && section.isMultiPart && section.parts && (
-                                  <div className="bg-black/20 p-3 border-t border-slate-800 space-y-2">
-                                      <div className="text-xs font-bold text-slate-500 uppercase px-1">Partes Generadas</div>
-                                      {section.parts.map((part, idx) => (
-                                          <div key={idx} className="flex items-center justify-between bg-slate-900 p-2 rounded-lg border border-slate-800">
-                                              <span className="text-xs text-slate-300 ml-2">Part {idx + 1}</span>
-                                              <div className="flex gap-2">
-                                                  <a href={part.url} download={`${part.title}.wav`} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><Download size={14}/></a>
-                                                  <button onClick={() => onSendToPlayer(part.url, part.title, part.blob)} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><PlayCircle size={14}/></button>
-                                              </div>
+                                      
+                                      <div className="flex-1 min-w-0">
+                                          <h4 className="font-semibold text-slate-200 truncate">{section.title}</h4>
+                                          <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
+                                              {section.status === 'completed' && section.actualDuration !== undefined ? (
+                                                  <>
+                                                      <span className={`flex items-center gap-1 font-bold ${language === 'es' ? 'text-indigo-300' : 'text-emerald-300'}`}>
+                                                          <Clock size={10} /> {formatTime(section.actualDuration)}
+                                                      </span>
+                                                      <span>•</span>
+                                                      <span className="flex items-center gap-1" title={language === 'es' ? 'Tiempo de generación' : 'Generation time'}>
+                                                          <Timer size={10} /> {section.generationTime?.toFixed(1)}s
+                                                      </span>
+                                                  </>
+                                              ) : (
+                                                  // --- NEW ESTIMATION DISPLAY ---
+                                                  <div className="flex gap-4">
+                                                      <span className="flex items-center gap-1 text-slate-400" title={language === 'es' ? 'Duración aproximada del audio final' : 'Estimated final audio duration'}>
+                                                          <Music size={10} className="text-blue-400"/> {language === 'es' ? 'Audio:' : 'Audio:'} {formatTime(estAudioDurationSec)}
+                                                      </span>
+                                                      <span className={`flex items-center gap-1 ${settings.isPaid ? 'text-green-400 font-bold' : 'text-slate-400'}`} title={language === 'es' ? 'Tiempo de espera para generar' : 'Wait time to generate'}>
+                                                          <Hourglass size={10} className={settings.isPaid ? 'text-green-400' : 'text-amber-500'}/> {language === 'es' ? 'Espera:' : 'Wait:'} {estGenWaitSec < 60 ? `${Math.ceil(estGenWaitSec)}s` : formatTime(estGenWaitSec)}
+                                                      </span>
+                                                  </div>
+                                              )}
+                                              {!section.status.includes('completed') && (
+                                                  <>
+                                                  <span className="text-slate-700">•</span>
+                                                  <span>{Math.round(section.charCount / 1000)}k chars</span>
+                                                  </>
+                                              )}
                                           </div>
-                                      ))}
-                                  </div>
-                              )}
+                                      </div>
 
-                              {/* ERROR MSG */}
-                              {section.status === 'error' && (
-                                  <div className="px-4 pb-4 text-xs text-red-400 flex items-center gap-2">
-                                      <AlertCircle size={12} /> {section.currentStep}
+                                      {/* Action Buttons */}
+                                      <div className="flex items-center gap-2">
+                                        {/* Edit Button - Allowed unless generating */}
+                                        {section.status !== 'generating' && section.status !== 'merging' && (
+                                            <button 
+                                                onClick={() => handleOpenEdit(section)}
+                                                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg border border-slate-700 transition-colors"
+                                                title={language === 'es' ? 'Editar texto' : 'Edit text'}
+                                            >
+                                                <Edit2 size={16} />
+                                            </button>
+                                        )}
+
+                                        {section.status === 'idle' || section.status === 'error' ? (
+                                            <button 
+                                                onClick={() => handleGenerateClick(section.id)}
+                                                className={`px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 flex items-center gap-2 ${themeBg} hover:opacity-90`}
+                                            >
+                                                <Zap size={16} fill="currentColor" /> {t.generateBtn}
+                                            </button>
+                                        ) : section.status === 'generating' || section.status === 'paused' ? (
+                                            <>
+                                                {section.status === 'generating' ? (
+                                                    <button onClick={() => handlePause(section.id)} className="p-2 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg border border-slate-600">
+                                                        <Pause size={18} fill="currentColor" />
+                                                    </button>
+                                                ) : (
+                                                    <button onClick={() => handleResume(section.id)} className="p-2 bg-slate-800 hover:bg-slate-700 text-green-400 rounded-lg border border-slate-600">
+                                                        <Play size={18} fill="currentColor" />
+                                                    </button>
+                                                )}
+                                                <button onClick={() => handleCancel(section.id)} className="p-2 bg-slate-800 hover:bg-red-900/30 text-red-400 rounded-lg border border-slate-600">
+                                                    <Square size={18} fill="currentColor" />
+                                                </button>
+                                            </>
+                                        ) : section.status === 'completed' ? (
+                                            <>
+                                                <button onClick={() => section.audioUrl && onSendToPlayer(section.audioUrl, section.title, section.blob)} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg border border-slate-600">
+                                                    <PlayCircle size={20} />
+                                                </button>
+                                                <button onClick={() => handleDeleteSection(section.id)} className="p-2 hover:bg-red-900/30 text-slate-500 hover:text-red-400 rounded-lg">
+                                                    <Trash2 size={18} />
+                                                </button>
+                                            </>
+                                        ) : null}
+                                      </div>
                                   </div>
-                              )}
-                          </div>
-                      ))
+
+                                  {/* PROGRESS BAR */}
+                                  {(section.status === 'generating' || section.status === 'merging' || section.status === 'paused') && (
+                                      <div className="px-4 pb-4">
+                                          <div className="flex justify-between text-xs text-slate-400 mb-1">
+                                              <span>{section.status === 'paused' ? (language === 'es' ? 'Pausado' : 'Paused') : section.currentStep}</span>
+                                              <span>{section.progress}%</span>
+                                          </div>
+                                          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                              <div 
+                                                className={`h-full transition-all duration-300 ${section.status === 'paused' ? 'bg-yellow-500' : themeBg}`} 
+                                                style={{ width: `${section.progress}%` }}
+                                              ></div>
+                                          </div>
+                                      </div>
+                                  )}
+
+                                  {/* RESULT: SINGLE PLAYER */}
+                                  {section.status === 'completed' && !section.isMultiPart && section.audioUrl && (
+                                      <div className="bg-black/20 p-3 border-t border-slate-800">
+                                          <AudioPlayer 
+                                            chunk={{
+                                                id: section.id,
+                                                index: 0,
+                                                text: 'Full Audio',
+                                                title: section.title,
+                                                charCount: section.charCount,
+                                                estimatedDurationSec: section.estimatedDuration * 60,
+                                                estimatedGenTimeSec: 0,
+                                                status: 'success',
+                                                downloaded: false,
+                                                audioUrl: section.audioUrl,
+                                                blob: section.blob
+                                            }}
+                                            onDownload={()=>{}}
+                                            language={language}
+                                          />
+                                      </div>
+                                  )}
+
+                                  {/* RESULT: MULTI PARTS */}
+                                  {section.status === 'completed' && section.isMultiPart && section.parts && (
+                                      <div className="bg-black/20 p-3 border-t border-slate-800 space-y-2">
+                                          <div className="text-xs font-bold text-slate-500 uppercase px-1">Partes Generadas</div>
+                                          {section.parts.map((part, idx) => (
+                                              <div key={idx} className="flex items-center justify-between bg-slate-900 p-2 rounded-lg border border-slate-800">
+                                                  <span className="text-xs text-slate-300 ml-2">Part {idx + 1}</span>
+                                                  <div className="flex gap-2">
+                                                      <a href={part.url} download={`${part.title}.wav`} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><Download size={14}/></a>
+                                                      <button onClick={() => onSendToPlayer(part.url, part.title, part.blob)} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><PlayCircle size={14}/></button>
+                                                  </div>
+                                              </div>
+                                          ))}
+                                      </div>
+                                  )}
+
+                                  {/* ERROR MSG */}
+                                  {section.status === 'error' && (
+                                      <div className="px-4 pb-4 text-xs text-red-400 flex items-center gap-2">
+                                          <AlertCircle size={12} /> {section.currentStep}
+                                      </div>
+                                  )}
+                              </div>
+                          );
+                      })
                   )}
               </div>
 
