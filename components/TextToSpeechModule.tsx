@@ -1,5 +1,5 @@
 import React, { useState, useRef, DragEvent, useEffect } from 'react';
-import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass } from 'lucide-react';
+import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass, CheckSquare } from 'lucide-react';
 import { VOICES_ES, VOICES_EN, MAX_CHARS_PER_CHUNK, UI_TEXT, SAMPLE_RATE } from '../constants';
 import { VoiceOption, GenerationSettings, Language, ProjectSection, InternalChunk } from '../types';
 import VoiceCard from './VoiceCard';
@@ -8,7 +8,7 @@ import { generateSpeechFromText, optimizeTextForSpeech } from '../services/gemin
 import { mergeWavBlobs } from '../utils/audioUtils';
 
 // --- Constants ---
-const LONG_AUDIO_THRESHOLD_CHARS = 15000; // Approx 15 minutes of speech
+const LONG_AUDIO_THRESHOLD_CHARS = 12000; // Force split if > 12000 chars (~10-12 mins)
 
 interface TTSModuleProps {
   apiKey: string;
@@ -32,6 +32,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   const [projectTitle, setProjectTitle] = useState('');
   const [fullText, setFullText] = useState('');
   const [sections, setSections] = useState<ProjectSection[]>([]);
+  const [selectedSectionIds, setSelectedSectionIds] = useState<Set<string>>(new Set());
   
   // Control Refs
   const controlRefs = useRef<Record<string, { paused: boolean; cancelled: boolean }>>({});
@@ -43,7 +44,9 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   // UI State
   const [isDragging, setIsDragging] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(true);
-  const [showLongAudioModal, setShowLongAudioModal] = useState<{sectionId: string} | null>(null);
+  
+  // Merge Status
+  const [isMergingSelected, setIsMergingSelected] = useState(false);
 
   const [selectedVoice, setSelectedVoice] = useState<VoiceOption>(VOICES[0]);
   const [settings, setSettings] = useState<GenerationSettings>({
@@ -64,31 +67,58 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     }
   }, [language, selectedVoice.id]);
 
-  // --- Logic: Chapter Parsing ---
+  // --- Logic: Chapter Parsing & Auto Splitting ---
   const parseAndSetSections = (text: string, titleBase: string) => {
       const lines = text.split('\n');
       const foundSections: ProjectSection[] = [];
       let currentTitle = "Intro";
       let currentBuffer: string[] = [];
       
-      // Regex for common chapter headers
       const chapterRegex = /^(#{1,3}\s+|Cap[íi]tulo\s+|Chapter\s+|Parte\s+|[IVXLCDM]+\.\s+|[0-9]+\.\s+)(.+)/i;
 
-      const pushSection = () => {
-          if (currentBuffer.length > 0) {
-              const content = currentBuffer.join('\n').trim();
-              if (content) {
+      // Helper to add sections, splitting if too large
+      const pushSection = (title: string, content: string) => {
+          if (!content.trim()) return;
+
+          // Check for auto-split threshold
+          if (content.length > LONG_AUDIO_THRESHOLD_CHARS) {
+              const partCount = Math.ceil(content.length / LONG_AUDIO_THRESHOLD_CHARS);
+              const partSize = Math.ceil(content.length / partCount);
+              
+              for (let i = 0; i < partCount; i++) {
+                  const start = i * partSize;
+                  const end = Math.min((i + 1) * partSize, content.length);
+                  // Adjust split to nearest space to avoid cutting words
+                  let safeEnd = end;
+                  if (end < content.length) {
+                      const lastSpace = content.lastIndexOf(' ', end);
+                      if (lastSpace > start) safeEnd = lastSpace;
+                  }
+                  
+                  const partContent = content.substring(start, safeEnd).trim();
+                  
                   foundSections.push({
                       id: `sec-${Date.now()}-${foundSections.length}`,
                       index: foundSections.length,
-                      title: currentTitle,
-                      content: content,
+                      title: `${title} (Part ${i + 1})`,
+                      content: partContent,
                       status: 'idle',
                       progress: 0,
-                      charCount: content.length,
-                      estimatedDuration: Math.ceil(content.length / 15)
+                      charCount: partContent.length,
+                      estimatedDuration: Math.ceil(partContent.length / 16) // Approx 16 chars/sec
                   });
               }
+          } else {
+              foundSections.push({
+                  id: `sec-${Date.now()}-${foundSections.length}`,
+                  index: foundSections.length,
+                  title: title,
+                  content: content,
+                  status: 'idle',
+                  progress: 0,
+                  charCount: content.length,
+                  estimatedDuration: Math.ceil(content.length / 16)
+              });
           }
       };
 
@@ -97,29 +127,27 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
           const isUpperCaseTitle = line.length > 3 && line.length < 80 && line === line.toUpperCase() && /[A-Z]/.test(line);
 
           if ((match && line.length < 100) || isUpperCaseTitle) {
-              pushSection();
+              if (currentBuffer.length > 0) {
+                  pushSection(currentTitle, currentBuffer.join('\n').trim());
+              }
               currentTitle = match ? line.trim() : line.trim(); 
               currentBuffer = []; 
           } else {
               currentBuffer.push(line);
           }
       });
-      pushSection();
+      // Push last buffer
+      if (currentBuffer.length > 0) {
+          pushSection(currentTitle, currentBuffer.join('\n').trim());
+      }
 
+      // Fallback for empty parse
       if (foundSections.length === 0 && text.trim()) {
-          foundSections.push({
-              id: `sec-${Date.now()}-0`,
-              index: 0,
-              title: titleBase || (language === 'es' ? 'Documento Completo' : 'Full Document'),
-              content: text,
-              status: 'idle',
-              progress: 0,
-              charCount: text.length,
-              estimatedDuration: Math.ceil(text.length / 15)
-          });
+          pushSection(titleBase || (language === 'es' ? 'Documento Completo' : 'Full Document'), text);
       }
 
       setSections(foundSections);
+      setSelectedSectionIds(new Set()); // Reset selection
   };
 
   const handleFileUpload = (file: File) => {
@@ -136,6 +164,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
   const handleTextChange = (newText: string) => {
       setFullText(newText);
+      // Only single section update if user types manually from scratch
       if (sections.length <= 1) {
           setSections([{
               id: sections[0]?.id || `sec-${Date.now()}`,
@@ -145,7 +174,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
               status: sections[0]?.status === 'completed' ? 'idle' : (sections[0]?.status || 'idle'),
               progress: 0,
               charCount: newText.length,
-              estimatedDuration: Math.ceil(newText.length / 15),
+              estimatedDuration: Math.ceil(newText.length / 16),
               audioUrl: sections[0]?.audioUrl, 
               blob: sections[0]?.blob
           }]);
@@ -160,17 +189,14 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
   const handleSaveEdit = () => {
       if (!editingSection) return;
-
       const newContent = tempEditText;
       const newCharCount = newContent.length;
-      const newDuration = Math.ceil(newContent.length / 15);
 
       setSections(prev => prev.map(s => s.id === editingSection.id ? {
           ...s,
           content: newContent,
           charCount: newCharCount,
-          estimatedDuration: newDuration,
-          // Reset status if it was completed or error to force regeneration
+          estimatedDuration: Math.ceil(newCharCount / 16),
           status: 'idle',
           progress: 0,
           currentStep: undefined,
@@ -185,7 +211,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       setTempEditText('');
   };
 
-  // --- Logic: Invisible Splitting ---
+  // --- Logic: Invisible Splitting for API ---
   const splitTextInternal = (text: string): string[] => {
       if (text.length <= MAX_CHARS_PER_CHUNK) return [text];
       
@@ -228,7 +254,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   };
 
   // --- Logic: Control Functions ---
-
   const handleCancel = (sectionId: string) => {
       if (controlRefs.current[sectionId]) {
           controlRefs.current[sectionId].cancelled = true;
@@ -252,7 +277,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   };
 
   // --- Logic: Generation ---
-  const startGeneration = async (sectionId: string, mode: 'merge' | 'separate') => {
+  const startGeneration = async (sectionId: string) => {
       if (!apiKey) { setShowKeyModal(true); return; }
       
       const section = sections.find(s => s.id === sectionId);
@@ -267,7 +292,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'generating', progress: 0, currentStep: `Initializing ${totalParts} segments...` } : s));
 
       const generatedBlobs: Blob[] = [];
-      const separateParts: { url: string; blob: Blob; title: string }[] = [];
 
       try {
           for (let i = 0; i < totalParts; i++) {
@@ -301,17 +325,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
               const blob = await generateSpeechFromText(textToGen, selectedVoice, settings, apiKey, language);
               generatedBlobs.push(blob);
               
-              if (mode === 'separate') {
-                  separateParts.push({
-                      url: URL.createObjectURL(blob),
-                      blob: blob,
-                      title: `${section.title} - Part ${i + 1}`
-                  });
-              }
-              
               // Throttling Logic
-              // If Paid Key (Turbo Mode) is enabled, we skip the waiting time (use 100ms just to breathe)
-              // If Free Mode (default), we wait 12s.
               let waitTime = 12000; 
               if (settings.isPaid) {
                   waitTime = 100;
@@ -319,7 +333,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                   if (settings.autoOptimize) waitTime += 8000; 
               }
               
-              // Only wait if it's not the last chunk
               if (i < totalParts - 1) {
                   if (waitTime > 1000) {
                        setSections(prev => prev.map(s => s.id === sectionId ? { 
@@ -338,22 +351,17 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
           let finalUrl = '';
           let finalBlob: Blob | undefined;
 
-          if (mode === 'merge' || generatedBlobs.length === 1) {
-              if (generatedBlobs.length > 1) {
-                  finalBlob = await mergeWavBlobs(generatedBlobs);
-              } else {
-                  finalBlob = generatedBlobs[0];
-              }
-              finalUrl = URL.createObjectURL(finalBlob);
+          // Always merge internal chunks of a single section
+          if (generatedBlobs.length > 1) {
+              finalBlob = await mergeWavBlobs(generatedBlobs);
           } else {
               finalBlob = generatedBlobs[0];
-              finalUrl = URL.createObjectURL(finalBlob);
           }
+          finalUrl = URL.createObjectURL(finalBlob);
           
           const endTime = Date.now();
           const genTimeSec = (endTime - startTime) / 1000;
           
-          // Calculate Audio Duration from Blob Size (WAV)
           let audioDurationSec = 0;
           if (finalBlob) {
              const headerSize = 44;
@@ -367,8 +375,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
               progress: 100, 
               audioUrl: finalUrl,
               blob: finalBlob,
-              isMultiPart: mode === 'separate' && generatedBlobs.length > 1,
-              parts: separateParts,
+              isMultiPart: false, // Internal chunks merged automatically
               actualDuration: audioDurationSec,
               generationTime: genTimeSec
           } : s));
@@ -379,7 +386,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
           } else {
                console.error(error);
                let msg = error.message;
-               // Use the new error message from service directly or fallback
                if(msg.includes('Quota')) msg = msg; 
                else if (msg.includes('Límite')) msg = msg;
                else msg = language === 'es' ? 'Error desconocido. Revisa consola.' : 'Unknown error. Check console.';
@@ -392,18 +398,74 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   };
 
   const handleGenerateClick = (sectionId: string) => {
-      const section = sections.find(s => s.id === sectionId);
-      if (!section) return;
-      if (section.charCount > LONG_AUDIO_THRESHOLD_CHARS) {
-          setShowLongAudioModal({ sectionId });
-      } else {
-          startGeneration(sectionId, 'merge');
-      }
+      startGeneration(sectionId);
   };
 
   const handleDeleteSection = (id: string) => {
       if(window.confirm(language === 'es' ? "¿Eliminar este audio?" : "Delete this audio?")) {
         setSections(prev => prev.map(s => s.id === id ? { ...s, status: 'idle', audioUrl: undefined, blob: undefined, parts: undefined, actualDuration: undefined, generationTime: undefined } : s));
+        setSelectedSectionIds(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+        });
+      }
+  };
+
+  // --- Logic: Selection & Merging ---
+  const toggleSelection = (id: string) => {
+      setSelectedSectionIds(prev => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+      });
+  };
+
+  const toggleSelectAll = () => {
+      if (selectedSectionIds.size === sections.length) {
+          setSelectedSectionIds(new Set());
+      } else {
+          setSelectedSectionIds(new Set(sections.map(s => s.id)));
+      }
+  };
+
+  const handleMergeSelected = async () => {
+      const selected = sections.filter(s => selectedSectionIds.has(s.id) && s.status === 'completed' && s.blob);
+      if (selected.length < 2) return;
+
+      setIsMergingSelected(true);
+      try {
+          const blobs = selected.map(s => s.blob!);
+          const mergedBlob = await mergeWavBlobs(blobs);
+          const url = URL.createObjectURL(mergedBlob);
+          
+          // Calculate stats
+          const totalDuration = selected.reduce((acc, s) => acc + (s.actualDuration || 0), 0);
+          const totalChars = selected.reduce((acc, s) => acc + s.charCount, 0);
+
+          // Add as new section
+          const newSection: ProjectSection = {
+              id: `merged-${Date.now()}`,
+              index: sections.length,
+              title: `${projectTitle || 'Merged'} - Combined Audio`,
+              content: '(Merged Content)',
+              charCount: totalChars,
+              estimatedDuration: Math.ceil(totalDuration / 60),
+              actualDuration: totalDuration,
+              status: 'completed',
+              progress: 100,
+              audioUrl: url,
+              blob: mergedBlob
+          };
+
+          setSections(prev => [newSection, ...prev]);
+          setSelectedSectionIds(new Set()); // Deselect after merge
+      } catch (e) {
+          console.error("Merge error", e);
+          alert(language === 'es' ? "Error al unir audios" : "Error merging audios");
+      } finally {
+          setIsMergingSelected(false);
       }
   };
 
@@ -419,7 +481,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   // --- Statistics Calculation ---
   const totalChars = sections.reduce((acc, curr) => acc + curr.charCount, 0);
   const totalEstimatedMins = sections.reduce((acc, curr) => acc + curr.estimatedDuration, 0);
-  
   const estimatedCost = (totalChars / 4000000) * 0.375; 
 
   return (
@@ -478,50 +539,9 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
              </div>
         )}
 
-        {/* --- MODAL: LONG AUDIO DECISION --- */}
-        {showLongAudioModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-                <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4">
-                    <div className="flex items-center gap-3 text-amber-400">
-                        <AlertCircle size={24} />
-                        <h3 className="text-lg font-bold">{language === 'es' ? 'Audio Extenso Detectado' : 'Long Audio Detected'}</h3>
-                    </div>
-                    <p className="text-slate-300 text-sm">
-                        {language === 'es' 
-                         ? 'Este capítulo dura más de 15 minutos. ¿Cómo prefieres generar el resultado?' 
-                         : 'This chapter is over 15 minutes long. How do you want the result?'}
-                    </p>
-                    
-                    <div className="grid grid-cols-1 gap-3 pt-2">
-                        <button 
-                            onClick={() => { startGeneration(showLongAudioModal.sectionId, 'merge'); setShowLongAudioModal(null); }}
-                            className={`p-4 rounded-xl border flex items-center gap-3 hover:bg-slate-800 transition-colors text-left ${themeBorder} bg-slate-900`}
-                        >
-                            <div className={`p-2 rounded-full ${themeBg} text-white`}><Merge size={20}/></div>
-                            <div>
-                                <div className="font-bold text-white">{language === 'es' ? 'Un solo archivo (Unido)' : 'Single File (Merged)'}</div>
-                                <div className="text-xs text-slate-400">{language === 'es' ? 'Mejor para escuchar. Tarda un poco más al final.' : 'Best for listening. Takes a bit longer to finalize.'}</div>
-                            </div>
-                        </button>
-
-                        <button 
-                            onClick={() => { startGeneration(showLongAudioModal.sectionId, 'separate'); setShowLongAudioModal(null); }}
-                            className="p-4 rounded-xl border border-slate-700 bg-slate-800/50 flex items-center gap-3 hover:bg-slate-800 transition-colors text-left"
-                        >
-                             <div className="p-2 rounded-full bg-slate-700 text-slate-300"><Split size={20}/></div>
-                            <div>
-                                <div className="font-bold text-white">{language === 'es' ? 'Archivos Separados' : 'Separate Files'}</div>
-                                <div className="text-xs text-slate-400">{language === 'es' ? 'Genera Parte 1, Parte 2... en una lista.' : 'Generates Part 1, Part 2... as a list.'}</div>
-                            </div>
-                        </button>
-                    </div>
-                    <button onClick={() => setShowLongAudioModal(null)} className="w-full py-2 text-slate-500 hover:text-white text-sm">Cancel</button>
-                </div>
-            </div>
-        )}
-
       {/* --- LEFT: EDITOR & INPUT --- */}
-      <div className="lg:col-span-7 flex flex-col h-full space-y-6">
+      {/* Reduced from col-span-7 to col-span-5 to move divider left */}
+      <div className="lg:col-span-5 flex flex-col h-full space-y-6">
          
          {/* Title & Import */}
          <div className="flex items-center gap-4">
@@ -578,7 +598,8 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       </div>
 
       {/* --- RIGHT: DASHBOARD & GENERATION --- */}
-      <div className="lg:col-span-5 flex flex-col space-y-6">
+      {/* Increased from col-span-5 to col-span-7 to expand right side */}
+      <div className="lg:col-span-7 flex flex-col space-y-6">
           
           {/* Voice & Settings - Collapsible */}
           <div className="bg-slate-800/40 rounded-xl border border-slate-700/50 overflow-hidden">
@@ -680,15 +701,46 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
           {/* DOCUMENT LIST (Sections) */}
           <div className="flex-1 bg-slate-900/50 rounded-2xl border border-slate-800 flex flex-col overflow-hidden">
-              <div className="p-4 border-b border-slate-800 bg-slate-950/50 flex items-center justify-between">
-                  <h3 className="font-bold text-white flex items-center gap-2">
-                      <FolderOpen size={18} className="text-amber-400" />
-                      {language === 'es' ? 'Documentos de Audio' : 'Audio Documents'}
-                  </h3>
+              <div className="p-4 border-b border-slate-800 bg-slate-950/50 flex flex-wrap gap-3 items-center justify-between">
+                  <div className="flex items-center gap-3">
+                      <h3 className="font-bold text-white flex items-center gap-2">
+                          <FolderOpen size={18} className="text-amber-400" />
+                          {language === 'es' ? 'Documentos' : 'Documents'}
+                      </h3>
+                      {sections.length > 0 && (
+                          <span className="text-xs bg-slate-800 text-slate-400 px-2 py-1 rounded-full">{sections.length}</span>
+                      )}
+                  </div>
+
+                  {/* Bulk Actions */}
                   {sections.length > 0 && (
-                      <span className="text-xs bg-slate-800 text-slate-400 px-2 py-1 rounded-full">{sections.length}</span>
+                      <div className="flex items-center gap-2">
+                        <button 
+                           onClick={toggleSelectAll} 
+                           className="text-xs text-slate-400 hover:text-white transition-colors"
+                        >
+                           {selectedSectionIds.size === sections.length ? t.deselectAll : t.selectAll}
+                        </button>
+                      </div>
                   )}
               </div>
+              
+              {/* MERGE BAR (Visible when items selected) */}
+              {selectedSectionIds.size > 1 && (
+                  <div className="bg-slate-800 p-3 flex items-center justify-between border-b border-slate-700 animate-in slide-in-from-top-2">
+                      <div className="text-sm text-slate-300 font-medium pl-2">
+                          {t.itemsSelected.replace('{n}', selectedSectionIds.size.toString())}
+                      </div>
+                      <button 
+                          onClick={handleMergeSelected}
+                          disabled={isMergingSelected}
+                          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 ${themeBg} hover:opacity-90 disabled:opacity-50`}
+                      >
+                          {isMergingSelected ? <Loader2 size={16} className="animate-spin" /> : <Merge size={16} />}
+                          {t.mergeSelected}
+                      </button>
+                  </div>
+              )}
 
               <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar">
                   {sections.length === 0 ? (
@@ -712,10 +764,21 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                           return (
                               <div 
                                 key={section.id} 
-                                className={`rounded-xl border transition-all overflow-hidden ${section.status === 'completed' ? 'bg-slate-900/80 border-slate-700' : 'bg-slate-800/40 border-slate-700/50'}`}
+                                className={`rounded-xl border transition-all overflow-hidden relative group/item ${section.status === 'completed' ? 'bg-slate-900/80 border-slate-700' : 'bg-slate-800/40 border-slate-700/50'} ${selectedSectionIds.has(section.id) ? 'ring-2 ring-amber-500/50' : ''}`}
                               >
+                                  {/* SELECTION CHECKBOX (Absolute positioned for easy access) */}
+                                  <div className="absolute top-4 left-3 z-10">
+                                      <button 
+                                          onClick={() => toggleSelection(section.id)}
+                                          className={`p-1 rounded transition-colors ${selectedSectionIds.has(section.id) ? 'text-amber-400' : 'text-slate-600 hover:text-slate-400'}`}
+                                      >
+                                          {selectedSectionIds.has(section.id) ? <CheckSquare size={20} fill="currentColor" className="bg-slate-900"/> : <Square size={20} />}
+                                      </button>
+                                  </div>
+
                                   {/* HEADER */}
-                                  <div className="p-4 flex items-center gap-4">
+                                  <div className="p-4 pl-12 flex items-center gap-4">
+                                      {/* Status Icon */}
                                       <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${section.status === 'completed' ? 'bg-green-500/20 text-green-400' : (section.status === 'generating' || section.status === 'merging' ? 'bg-amber-500/20 text-amber-400' : (section.status === 'paused' ? 'bg-yellow-500/20 text-yellow-400' : (section.status === 'error' ? 'bg-red-500/20 text-red-400' : 'bg-slate-700 text-slate-400')))}`}>
                                           {section.status === 'generating' || section.status === 'merging' ? <Loader2 size={20} className="animate-spin" /> : 
                                            section.status === 'paused' ? <Pause size={20} /> :
@@ -725,7 +788,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                       
                                       <div className="flex-1 min-w-0">
                                           <h4 className="font-semibold text-slate-200 truncate">{section.title}</h4>
-                                          <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
+                                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 mt-1">
                                               {section.status === 'completed' && section.actualDuration !== undefined ? (
                                                   <>
                                                       <span className={`flex items-center gap-1 font-bold ${language === 'es' ? 'text-indigo-300' : 'text-emerald-300'}`}>
@@ -738,7 +801,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                                   </>
                                               ) : (
                                                   // --- NEW ESTIMATION DISPLAY ---
-                                                  <div className="flex gap-4">
+                                                  <div className="flex flex-wrap gap-x-4 gap-y-1">
                                                       <span className="flex items-center gap-1 text-slate-400" title={language === 'es' ? 'Duración aproximada del audio final' : 'Estimated final audio duration'}>
                                                           <Music size={10} className="text-blue-400"/> {language === 'es' ? 'Audio:' : 'Audio:'} {formatTime(estAudioDurationSec)}
                                                       </span>
@@ -806,7 +869,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
                                   {/* PROGRESS BAR */}
                                   {(section.status === 'generating' || section.status === 'merging' || section.status === 'paused') && (
-                                      <div className="px-4 pb-4">
+                                      <div className="px-4 pb-4 pl-12">
                                           <div className="flex justify-between text-xs text-slate-400 mb-1">
                                               <span>{section.status === 'paused' ? (language === 'es' ? 'Pausado' : 'Paused') : section.currentStep}</span>
                                               <span>{section.progress}%</span>
@@ -822,7 +885,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
                                   {/* RESULT: SINGLE PLAYER */}
                                   {section.status === 'completed' && !section.isMultiPart && section.audioUrl && (
-                                      <div className="bg-black/20 p-3 border-t border-slate-800">
+                                      <div className="bg-black/20 p-3 pl-12 border-t border-slate-800">
                                           <AudioPlayer 
                                             chunk={{
                                                 id: section.id,
@@ -843,25 +906,9 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                       </div>
                                   )}
 
-                                  {/* RESULT: MULTI PARTS */}
-                                  {section.status === 'completed' && section.isMultiPart && section.parts && (
-                                      <div className="bg-black/20 p-3 border-t border-slate-800 space-y-2">
-                                          <div className="text-xs font-bold text-slate-500 uppercase px-1">Partes Generadas</div>
-                                          {section.parts.map((part, idx) => (
-                                              <div key={idx} className="flex items-center justify-between bg-slate-900 p-2 rounded-lg border border-slate-800">
-                                                  <span className="text-xs text-slate-300 ml-2">Part {idx + 1}</span>
-                                                  <div className="flex gap-2">
-                                                      <a href={part.url} download={`${part.title}.wav`} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><Download size={14}/></a>
-                                                      <button onClick={() => onSendToPlayer(part.url, part.title, part.blob)} className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 hover:text-white"><PlayCircle size={14}/></button>
-                                                  </div>
-                                              </div>
-                                          ))}
-                                      </div>
-                                  )}
-
                                   {/* ERROR MSG */}
                                   {section.status === 'error' && (
-                                      <div className="px-4 pb-4 text-xs text-red-400 flex items-center gap-2">
+                                      <div className="px-4 pb-4 pl-12 text-xs text-red-400 flex items-center gap-2">
                                           <AlertCircle size={12} /> {section.currentStep}
                                       </div>
                                   )}
