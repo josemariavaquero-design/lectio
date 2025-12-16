@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, Type, SchemaType } from "@google/genai";
+import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { decodeBase64, pcmToWav } from "../utils/audioUtils";
 import { GenerationSettings, VoiceOption, Language } from "../types";
 
