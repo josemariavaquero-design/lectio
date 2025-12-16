@@ -1,5 +1,5 @@
 import React, { useState, useRef, DragEvent, useEffect } from 'react';
-import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass, CheckSquare } from 'lucide-react';
+import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass, CheckSquare, StopCircle } from 'lucide-react';
 import { VOICES_ES, VOICES_EN, MAX_CHARS_PER_CHUNK, UI_TEXT, SAMPLE_RATE } from '../constants';
 import { VoiceOption, GenerationSettings, Language, ProjectSection, InternalChunk } from '../types';
 import VoiceCard from './VoiceCard';
@@ -36,6 +36,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   
   // Control Refs
   const controlRefs = useRef<Record<string, { paused: boolean; cancelled: boolean }>>({});
+  const batchStopRef = useRef(false);
 
   // Editing State
   const [editingSection, setEditingSection] = useState<ProjectSection | null>(null);
@@ -45,8 +46,9 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(true);
   
-  // Merge Status
+  // Batch / Merge Status
   const [isMergingSelected, setIsMergingSelected] = useState(false);
+  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
 
   const [selectedVoice, setSelectedVoice] = useState<VoiceOption>(VOICES[0]);
   const [settings, setSettings] = useState<GenerationSettings>({
@@ -277,11 +279,12 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   };
 
   // --- Logic: Generation ---
-  const startGeneration = async (sectionId: string) => {
-      if (!apiKey) { setShowKeyModal(true); return; }
+  // Modified to return a Promise<boolean> indicating success
+  const startGeneration = async (sectionId: string): Promise<boolean> => {
+      if (!apiKey) { setShowKeyModal(true); return false; }
       
       const section = sections.find(s => s.id === sectionId);
-      if (!section) return;
+      if (!section) return false;
 
       const startTime = Date.now();
       controlRefs.current[sectionId] = { paused: false, cancelled: false };
@@ -328,7 +331,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
               // Throttling Logic
               let waitTime = 12000; 
               if (settings.isPaid) {
-                  waitTime = 100;
+                  waitTime = 500; // Increased to 500ms to be safe even in Turbo Mode against burst limits
               } else {
                   if (settings.autoOptimize) waitTime += 8000; 
               }
@@ -380,6 +383,8 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
               generationTime: genTimeSec
           } : s));
 
+          return true; // Success
+
       } catch (error: any) {
           if (error.message === "Cancelled by user") {
                console.log("Generation cancelled");
@@ -392,6 +397,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                
                setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'error', currentStep: msg } : s));
           }
+          return false; // Failed
       } finally {
           delete controlRefs.current[sectionId];
       }
@@ -412,7 +418,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       }
   };
 
-  // --- Logic: Selection & Merging ---
+  // --- Logic: Selection & Batch Operations ---
   const toggleSelection = (id: string) => {
       setSelectedSectionIds(prev => {
           const next = new Set(prev);
@@ -428,6 +434,53 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       } else {
           setSelectedSectionIds(new Set(sections.map(s => s.id)));
       }
+  };
+
+  // --- BATCH GENERATION ---
+  const handleBatchGenerate = async () => {
+      if (selectedSectionIds.size === 0) return;
+      
+      setIsBatchGenerating(true);
+      batchStopRef.current = false;
+
+      // Filter to only idle or error items within the selection
+      // Sort by index to maintain document order
+      const targetSections = sections
+          .filter(s => selectedSectionIds.has(s.id) && (s.status === 'idle' || s.status === 'error'))
+          .sort((a, b) => a.index - b.index);
+
+      if (targetSections.length === 0) {
+          setIsBatchGenerating(false);
+          return;
+      }
+
+      for (const section of targetSections) {
+          if (batchStopRef.current) break;
+          
+          // Wait for this section to finish before starting next
+          // This avoids 429 errors on free tier
+          const success = await startGeneration(section.id);
+          
+          if (!success) {
+               // CRITICAL SAFETY: Stop batch if one failed due to Quota/Error
+               batchStopRef.current = true;
+               setIsBatchGenerating(false);
+               alert(language === 'es' ? "La cola se ha detenido por un error. Revisa el mensaje en el elemento." : "Queue stopped due to an error. Check the item message.");
+               break;
+          }
+          
+          // Small pause between sections if not paid, just to be safe
+          if (!settings.isPaid && !batchStopRef.current) {
+              await new Promise(r => setTimeout(r, 1000));
+          }
+      }
+
+      setIsBatchGenerating(false);
+  };
+
+  const stopBatchGeneration = () => {
+      batchStopRef.current = true;
+      setIsBatchGenerating(false);
   };
 
   const handleMergeSelected = async () => {
@@ -725,20 +778,43 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                   )}
               </div>
               
-              {/* MERGE BAR (Visible when items selected) */}
-              {selectedSectionIds.size > 1 && (
+              {/* MERGE & BATCH BAR (Visible when items selected) */}
+              {selectedSectionIds.size > 0 && (
                   <div className="bg-slate-800 p-3 flex items-center justify-between border-b border-slate-700 animate-in slide-in-from-top-2">
-                      <div className="text-sm text-slate-300 font-medium pl-2">
+                      <div className="text-sm text-slate-300 font-medium pl-2 hidden sm:block">
                           {t.itemsSelected.replace('{n}', selectedSectionIds.size.toString())}
                       </div>
-                      <button 
-                          onClick={handleMergeSelected}
-                          disabled={isMergingSelected}
-                          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 ${themeBg} hover:opacity-90 disabled:opacity-50`}
-                      >
-                          {isMergingSelected ? <Loader2 size={16} className="animate-spin" /> : <Merge size={16} />}
-                          {t.mergeSelected}
-                      </button>
+                      
+                      <div className="flex gap-2 w-full sm:w-auto justify-end">
+                           {/* GENERATE BATCH */}
+                           {isBatchGenerating ? (
+                               <button 
+                                 onClick={stopBatchGeneration}
+                                 className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg bg-red-600 hover:bg-red-500 transition-colors animate-pulse"
+                               >
+                                   <StopCircle size={16} /> {language === 'es' ? 'Detener Cola' : 'Stop Queue'}
+                               </button>
+                           ) : (
+                               <button 
+                                   onClick={handleBatchGenerate}
+                                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 bg-green-600 hover:bg-green-500`}
+                               >
+                                   <Zap size={16} fill="currentColor" /> {language === 'es' ? 'Generar Seleccionados' : 'Generate Selected'}
+                               </button>
+                           )}
+
+                           {/* MERGE */}
+                           {selectedSectionIds.size > 1 && (
+                                <button 
+                                    onClick={handleMergeSelected}
+                                    disabled={isMergingSelected || isBatchGenerating}
+                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 ${themeBg} hover:opacity-90 disabled:opacity-50`}
+                                >
+                                    {isMergingSelected ? <Loader2 size={16} className="animate-spin" /> : <Merge size={16} />}
+                                    {t.mergeSelected}
+                                </button>
+                           )}
+                      </div>
                   </div>
               )}
 
@@ -769,7 +845,10 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                   {/* SELECTION CHECKBOX (Absolute positioned for easy access) */}
                                   <div className="absolute top-4 left-3 z-10">
                                       <button 
-                                          onClick={() => toggleSelection(section.id)}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            toggleSelection(section.id);
+                                          }}
                                           className={`p-1 rounded transition-colors ${selectedSectionIds.has(section.id) ? 'text-amber-400' : 'text-slate-600 hover:text-slate-400'}`}
                                       >
                                           {selectedSectionIds.has(section.id) ? <CheckSquare size={20} fill="currentColor" className="bg-slate-900"/> : <Square size={20} />}
@@ -835,7 +914,8 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                         {section.status === 'idle' || section.status === 'error' ? (
                                             <button 
                                                 onClick={() => handleGenerateClick(section.id)}
-                                                className={`px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 flex items-center gap-2 ${themeBg} hover:opacity-90`}
+                                                disabled={isBatchGenerating}
+                                                className={`px-4 py-2 rounded-lg text-sm font-bold text-white shadow-lg transition-transform active:scale-95 flex items-center gap-2 ${themeBg} hover:opacity-90 disabled:opacity-50 disabled:grayscale`}
                                             >
                                                 <Zap size={16} fill="currentColor" /> {t.generateBtn}
                                             </button>

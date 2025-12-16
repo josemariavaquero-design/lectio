@@ -102,7 +102,7 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES, delay =
         }
 
         if (retries > 0) {
-            // If it's a rate limit, wait 30 seconds to clear the RPM window
+            // If it's a rate limit, wait longer (30s) to attempt recovery
             const waitTime = isQuota ? 30000 : delay;
             
             console.warn(`Operation failed, retrying... (${retries} attempts left). Waiting ${waitTime/1000}s. Error: ${errorMsg}`);
@@ -112,7 +112,7 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES, delay =
         } else {
             // Final failure logic
             if (isQuota) {
-                throw new Error("Límite de cuota excedido. Si has esperado y sigue fallando, has alcanzado tu límite DIARIO (1500 reqs). Se renueva a las 09:00 AM (España).");
+                throw new Error("⛔ Límite de Cuota (429).\n\n1. Si usas CLAVE GRATUITA: Has excedido las 15 peticiones/min. Desactiva el 'Modo Turbo'.\n2. Si usas CLAVE PAGO: Tu proyecto en Google Cloud no tiene la facturación activada.");
             }
             throw new Error(errorMsg);
         }
