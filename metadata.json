@@ -1,0 +1,5 @@
+{
+  "name": "Lectio",
+  "description": "Generador de texto a voz de alta calidad enfocado en español de España usando Gemini 2.5.",
+  "requestFramePermissions": []
+}
