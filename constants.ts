@@ -1,6 +1,6 @@
 import { VoiceOption } from './types';
 
-export const APP_VERSION = '3.2.0';
+export const APP_VERSION = '3.3.0';
 export const APP_NAME = 'Lectio';
 
 // --- HELP / README CONTENT ---
@@ -15,7 +15,7 @@ export const HELP_CONTENT = {
         },
         {
           subtitle: 'Modo Pago (Pay-as-you-go)',
-          text: '• Coste: ~0,50€ - 2,00€ por libro entero.\n• Límites: 1000+ RPM (Mucho más rápido).\n• Cómo activar: Simplemente usa una API Key de un proyecto de Google Cloud con facturación activada. La app detectará la capacidad automáticamente.'
+          text: '• Coste: ~0,05€ - 0,15€ por libro entero (¡Céntimos!).\n• Basado en precios Gemini Flash: ~$0.30/1M tokens.\n• Límites: 1000+ RPM (Mucho más rápido).\n• Cómo activar: Usa una API Key de un proyecto de Google Cloud con facturación. La app lo detecta sola.'
         }
       ]
     },
@@ -57,7 +57,7 @@ export const HELP_CONTENT = {
         },
         {
           subtitle: 'Paid Tier (Pay-as-you-go)',
-          text: '• Cost: ~$0.50 - $2.00 per full book.\n• Limits: 1000+ RPM (Much faster).\n• How to activate: Simply use an API Key from a Google Cloud Project with billing enabled. The app works the same.'
+          text: '• Cost: ~$0.05 - $0.15 per full book (Cents!).\n• Based on Gemini Flash pricing: ~$0.30/1M tokens.\n• Limits: 1000+ RPM (Much faster).\n• How to activate: Use an API Key from a billing-enabled Google Cloud Project.'
         }
       ]
     },
