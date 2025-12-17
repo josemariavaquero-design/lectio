@@ -1,5 +1,5 @@
 import React, { useState, useRef, DragEvent, useEffect } from 'react';
-import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass, CheckSquare, StopCircle } from 'lucide-react';
+import { AudioWaveform, Loader2, Upload, FileText, Music, Clock, Edit2, Zap, PlayCircle, Settings2, Download, Trash2, FolderOpen, Layers, CheckCircle2, AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, Hourglass, SquareCheck, StopCircle } from 'lucide-react';
 import { VOICES_ES, VOICES_EN, MAX_CHARS_PER_CHUNK, UI_TEXT, SAMPLE_RATE } from '../constants';
 import { VoiceOption, GenerationSettings, Language, ProjectSection, InternalChunk } from '../types';
 import VoiceCard from './VoiceCard';
@@ -851,7 +851,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                           }}
                                           className={`p-1 rounded transition-colors ${selectedSectionIds.has(section.id) ? 'text-amber-400' : 'text-slate-600 hover:text-slate-400'}`}
                                       >
-                                          {selectedSectionIds.has(section.id) ? <CheckSquare size={20} fill="currentColor" className="bg-slate-900"/> : <Square size={20} />}
+                                          {selectedSectionIds.has(section.id) ? <SquareCheck size={20} fill="currentColor" className="bg-slate-900"/> : <Square size={20} />}
                                       </button>
                                   </div>
 
@@ -879,7 +879,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                                       </span>
                                                   </>
                                               ) : (
-                                                  // --- NEW ESTIMATION DISPLAY ---
+                                                  // --- ESTIMATION DISPLAY ---
                                                   <div className="flex flex-wrap gap-x-4 gap-y-1">
                                                       <span className="flex items-center gap-1 text-slate-400" title={language === 'es' ? 'Duración aproximada del audio final' : 'Estimated final audio duration'}>
                                                           <Music size={10} className="text-blue-400"/> {language === 'es' ? 'Audio:' : 'Audio:'} {formatTime(estAudioDurationSec)}

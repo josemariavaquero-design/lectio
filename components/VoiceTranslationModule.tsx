@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, Upload, Loader2, Volume2, Link as LinkIcon, AlertTriangle, Download, Music, RefreshCw, Scissors, Check, CheckSquare, Square, XCircle, Merge, FileAudio, Zap, PlayCircle } from 'lucide-react';
+import { Mic, Upload, Loader2, Volume2, Link as LinkIcon, AlertTriangle, Download, Music, RefreshCw, Scissors, Check, SquareCheck, Square, XCircle, Merge, FileAudio, Zap, PlayCircle } from 'lucide-react';
 import { Language, VoiceOption } from '../types';
 import { UI_TEXT, VOICES_ES, VOICES_EN } from '../constants';
 import { transcribeAndTranslateAudio, generateSpeechFromText } from '../services/geminiService';
@@ -191,7 +191,7 @@ const VoiceTranslationModule: React.FC<VTVProps> = ({ apiKey, language, themeCol
              chunk.translation, 
              selectedVoice, 
              // Use numeric defaults
-             { pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false },
+             { pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false, isPaid: false },
              apiKey,
              language
          );
@@ -247,7 +247,7 @@ const VoiceTranslationModule: React.FC<VTVProps> = ({ apiKey, language, themeCol
              textToSpeak, 
              selectedVoice, 
              // Use numeric defaults
-             { pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false },
+             { pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false, isPaid: false },
              apiKey,
              language
          );
@@ -487,7 +487,7 @@ const VoiceTranslationModule: React.FC<VTVProps> = ({ apiKey, language, themeCol
                                 onClick={() => toggleChunkSelection(chunk.id)}
                                 className={`shrink-0 ${chunk.selected ? themeText : 'text-slate-600'}`}
                             >
-                                {chunk.selected ? <CheckSquare size={20} /> : <Square size={20} />}
+                                {chunk.selected ? <SquareCheck size={20} /> : <Square size={20} />}
                             </button>
                             <span className="text-sm font-medium text-slate-300 w-16">Part {idx + 1}</span>
                         </div>
@@ -545,7 +545,7 @@ const VoiceTranslationModule: React.FC<VTVProps> = ({ apiKey, language, themeCol
                         onSelect={setSelectedVoice} 
                         apiKey={apiKey} 
                         language={language}
-                        settings={{ pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false }}
+                        settings={{ pitch: 0, speed: 1.0, dialogueMode: false, autoOptimize: false, isPaid: false }}
                      />
                  ))}
              </div>
