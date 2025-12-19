@@ -37,7 +37,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   const [sections, setSections] = useState<ProjectSection[]>([]);
   const [selectedSectionIds, setSelectedSectionIds] = useState<Set<string>>(new Set());
   
-  // Estados de control de flujo
+  // Estados de control
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(true);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
@@ -60,10 +60,11 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Estadísticas globales actualizadas por cada cambio en secciones
   const stats = useMemo(() => {
     const totalChars = sections.reduce((acc, s) => acc + s.charCount, 0);
-    const totalEstDuration = sections.reduce((acc, s) => acc + s.estimatedDuration, 0);
     const totalActualDuration = sections.reduce((acc, s) => acc + (s.actualDuration || 0), 0);
+    const totalEstDuration = sections.reduce((acc, s) => acc + s.estimatedDuration, 0);
     const totalGenTime = sections.reduce((acc, s) => acc + (s.generationTime || 0), 0);
     const completedCount = sections.filter(s => s.status === 'completed').length;
     
@@ -78,7 +79,9 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   }, [language]);
 
   const handleReset = () => {
-    if (window.confirm(language === 'es' ? "¿Reiniciar todo el proyecto?" : "Reset whole project?")) {
+    if (window.confirm(language === 'es' ? "¿Deseas borrar todo el proyecto actual?" : "Do you want to clear current project?")) {
+        // Limpiar URLs de audio para liberar memoria
+        sections.forEach(s => s.audioUrl && URL.revokeObjectURL(s.audioUrl));
         setProjectTitle('');
         setFullText('');
         setSections([]);
@@ -120,7 +123,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
         parseAndSetSections(text, fileName);
     } catch (error) {
         console.error("Error al leer archivo:", error);
-        alert(language === 'es' ? "Error al procesar el archivo." : "Error processing file.");
+        alert(language === 'es' ? "Error crítico al procesar el archivo." : "Critical error processing file.");
     } finally {
         setIsReadingFile(false);
     }
@@ -166,13 +169,14 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
   const startGeneration = async (sectionId: string): Promise<boolean> => {
     if (!apiKey) { setShowKeyModal(true); return false; }
-    const section = sections.find(s => s.id === sectionId);
-    if (!section) return false;
-
+    
     const startTime = Date.now();
-    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'generating', progress: 20 } : s));
+    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'generating', progress: 15 } : s));
 
     try {
+        const section = sections.find(s => s.id === sectionId);
+        if (!section) return false;
+
         const blob = await generateSpeechFromText(section.content, selectedVoice, settings, apiKey, language);
         const url = URL.createObjectURL(blob);
         const actualDuration = Math.max(0, (blob.size - 44) / (SAMPLE_RATE * 2));
@@ -202,21 +206,24 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     stopSignalRef.current = false;
     pauseSignalRef.current = false;
     
-    for (const section of sections) {
+    // Usamos una copia para evitar problemas de referencia durante el bucle
+    const pendingIds = Array.from(selectedSectionIds);
+    
+    for (const sectionId of pendingIds) {
         if (stopSignalRef.current) break;
         
-        // Bucle de espera si está pausado
+        // Control de pausa
         while (pauseSignalRef.current) {
             await new Promise(r => setTimeout(r, 500));
             if (stopSignalRef.current) break;
         }
         if (stopSignalRef.current) break;
 
-        if (selectedSectionIds.has(section.id) && section.status !== 'completed') {
-            await startGeneration(section.id);
-            if (!settings.isPaid) {
-                await new Promise(r => setTimeout(r, 1200));
-            }
+        const section = sections.find(s => s.id === sectionId);
+        if (section && section.status !== 'completed') {
+            await startGeneration(sectionId);
+            // Delay anti-throttling para cuentas gratis
+            if (!settings.isPaid) await new Promise(r => setTimeout(r, 1500));
         }
     }
     
@@ -247,14 +254,17 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       if (!section.audioUrl) return;
       const link = document.createElement('a');
       link.href = section.audioUrl;
-      link.download = `${section.title || 'audio'}.wav`;
+      // Nombre de archivo con el título del proyecto
+      const cleanTitle = projectTitle || 'audio';
+      const cleanSection = section.title.replace(/[^\w\s-]/gi, '').trim();
+      link.download = `${cleanTitle} - ${cleanSection}.wav`;
       link.click();
   };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full animate-in fade-in duration-500">
       
-      {/* PANEL IZQUIERDO: TEXTO E INPUT */}
+      {/* PANEL IZQUIERDO: TEXTO E IMPORTACIÓN */}
       <div className="lg:col-span-5 flex flex-col space-y-6">
          <div className="flex items-center gap-4">
              <div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 flex items-center gap-3">
@@ -262,7 +272,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                  <input type="text" value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)} placeholder={t.projectTitlePlaceholder} className="bg-transparent font-semibold text-white outline-none w-full" />
              </div>
              
-             <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-bold transition-all shadow-lg ${themeBg} text-white hover:opacity-90 active:scale-95`}>
+             <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-bold transition-all shadow-lg ${themeBg} text-white hover:opacity-90 active:scale-95 shrink-0`}>
                  {isReadingFile ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
                  <span className="text-xs">Subir Documento</span>
              </button>
@@ -271,11 +281,13 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
          <div className="flex-1 bg-slate-800/20 rounded-2xl border-2 border-dashed border-slate-800 relative flex flex-col overflow-hidden">
              <textarea value={fullText} onChange={(e) => setFullText(e.target.value)} placeholder={t.placeholderText} className="w-full h-full bg-transparent p-6 resize-none outline-none text-slate-300 custom-scrollbar font-light leading-relaxed text-sm" />
+             
              <div className="absolute bottom-4 left-4 flex gap-2">
-                <button onClick={handleReset} className="bg-slate-900/80 px-3 py-1.5 rounded-lg border border-red-500/30 text-[10px] text-red-400 font-bold flex items-center gap-1.5 hover:bg-red-500/10 transition-colors">
-                    <RotateCcw size={12} /> REINICIAR
+                <button onClick={handleReset} className="bg-slate-900/90 px-3 py-1.5 rounded-lg border border-red-500/50 text-[10px] text-red-400 font-bold flex items-center gap-1.5 hover:bg-red-500 hover:text-white transition-all">
+                    <RotateCcw size={12} /> REINICIAR PROYECTO
                 </button>
              </div>
+
              {fullText.length > 0 && (
                 <div className="absolute bottom-4 right-4 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-700 text-[10px] text-slate-400 font-mono">
                    {fullText.length.toLocaleString()} CARACTERES
@@ -284,12 +296,12 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
          </div>
       </div>
 
-      {/* PANEL DERECHO: DASHBOARD Y GESTIÓN */}
+      {/* PANEL DERECHO: PROGRESO Y CONTROLES */}
       <div className="lg:col-span-7 flex flex-col space-y-6">
           
           <div className="bg-slate-800/40 rounded-xl border border-slate-700 overflow-hidden">
              <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className="w-full p-4 flex items-center justify-between hover:bg-slate-800/50">
-                 <h3 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-widest"><Settings2 size={14} className={themeText} /> Configuración de Locución</h3>
+                 <h3 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-widest"><Settings2 size={14} className={themeText} /> Modulación de Voz</h3>
                  {isSettingsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
              </button>
              {isSettingsOpen && (
@@ -317,72 +329,79 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
           <div className="flex-1 bg-slate-900/50 rounded-2xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
               
-              {/* HEADER: ESTADÍSTICAS Y CONTROLES DE FLUJO */}
+              {/* HEADER DE CONTROL: ESTADÍSTICAS Y ACCIONES DE FLUJO */}
               <div className="p-4 bg-slate-950/50 border-b border-slate-800">
                   <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-white flex items-center gap-2 text-sm"><FolderOpen size={16} className="text-amber-400" /> Control del Proyecto</h3>
+                      <h3 className="font-bold text-white flex items-center gap-2 text-sm"><FolderOpen size={16} className="text-amber-400" /> Cola de Generación</h3>
                       <div className="flex items-center gap-3">
-                        <button onClick={() => setSelectedSectionIds(new Set(sections.map(s=>s.id)))} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter">Todo</button>
-                        <button onClick={() => setSelectedSectionIds(new Set())} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter">Limpiar</button>
+                        <button onClick={() => setSelectedSectionIds(new Set(sections.map(s=>s.id)))} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter transition-colors">Marcar Todos</button>
+                        <button onClick={() => setSelectedSectionIds(new Set())} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter transition-colors">Limpiar</button>
                       </div>
                   </div>
 
                   {sections.length > 0 && (
-                    <div className="grid grid-cols-4 gap-2 mb-2">
+                    <div className="grid grid-cols-4 gap-2 mb-4">
                         <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
                             <span className="text-[8px] text-slate-500 uppercase font-bold">Caracteres</span>
                             <span className="text-xs font-mono text-white">{stats.totalChars.toLocaleString()}</span>
                         </div>
                         <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Duración</span>
+                            <span className="text-[8px] text-slate-500 uppercase font-bold">Audio Real</span>
                             <span className="text-xs font-mono text-indigo-400">{formatTime(stats.totalActualDuration || stats.totalEstDuration)}</span>
                         </div>
                         <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Completados</span>
+                            <span className="text-[8px] text-slate-500 uppercase font-bold">Progreso</span>
                             <span className="text-xs font-mono text-green-400">{stats.completedCount}/{sections.length}</span>
                         </div>
                         <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Latencia IA</span>
+                            <span className="text-[8px] text-slate-500 uppercase font-bold">Tiempo IA</span>
                             <span className="text-xs font-mono text-amber-400">{stats.totalGenTime.toFixed(1)}s</span>
                         </div>
                     </div>
                   )}
 
                   {selectedSectionIds.size > 0 && (
-                      <div className="flex gap-2 animate-in slide-in-from-top-2 pt-2">
+                      <div className="flex gap-2 animate-in slide-in-from-top-2 pt-2 border-t border-slate-800">
                           {!isBatchGenerating ? (
-                              <button onClick={handleBatchGenerate} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-green-900/20 active:scale-95 transition-all">
-                                  <Zap size={14} fill="currentColor" /> GENERAR SELECCIONADOS ({selectedSectionIds.size})
+                              <button onClick={handleBatchGenerate} className="flex-1 flex items-center justify-center gap-2 py-3 bg-green-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-green-900/30 active:scale-95 transition-all">
+                                  <Zap size={14} fill="currentColor" /> LANZAR GENERACIÓN ({selectedSectionIds.size})
                               </button>
                           ) : (
                               <div className="flex-1 flex gap-2">
-                                  <button onClick={togglePause} className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold transition-all ${isPaused ? 'bg-indigo-600 animate-pulse' : 'bg-amber-600'}`}>
+                                  <button onClick={togglePause} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all shadow-lg ${isPaused ? 'bg-indigo-600 animate-pulse text-white' : 'bg-amber-600 text-white'}`}>
                                       {isPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
-                                      {isPaused ? 'REANUDAR' : 'PAUSAR'}
+                                      {isPaused ? 'REANUDAR PROCESO' : 'PAUSAR COLA'}
                                   </button>
-                                  <button onClick={stopGeneration} className="px-6 flex items-center justify-center gap-2 py-2.5 bg-red-600 text-white rounded-xl text-xs font-bold transition-all">
+                                  <button onClick={stopGeneration} className="px-6 flex items-center justify-center gap-2 py-3 bg-red-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg hover:bg-red-500">
                                       <StopCircle size={14} /> DETENER
                                   </button>
                               </div>
                           )}
                           
-                          {!isBatchGenerating && selectedSectionIds.size > 1 && (
+                          {!isBatchGenerating && stats.completedCount > 1 && (
                               <button onClick={() => {
                                   const blobs = sections.filter(s => selectedSectionIds.has(s.id) && s.blob).map(s => s.blob!);
-                                  if (blobs.length < 2) return alert("Genera los audios primero");
-                                  mergeWavBlobs(blobs).then(merged => onSendToPlayer(URL.createObjectURL(merged), `Master: ${projectTitle}`, merged));
-                              }} className={`px-4 py-2.5 ${themeBg} text-white rounded-xl text-xs font-bold flex items-center gap-2 hover:opacity-90`}>
-                                  <Merge size={14} /> UNIR
+                                  if (blobs.length < 2) return alert("Debes generar al menos 2 audios para unir.");
+                                  mergeWavBlobs(blobs).then(merged => {
+                                      const url = URL.createObjectURL(merged);
+                                      onSendToPlayer(url, `${projectTitle} - Completo`, merged);
+                                      const link = document.createElement('a');
+                                      link.href = url;
+                                      link.download = `${projectTitle} - Completo.wav`;
+                                      link.click();
+                                  });
+                              }} className={`px-4 py-3 ${themeBg} text-white rounded-xl text-xs font-bold flex items-center gap-2 hover:opacity-90 shadow-lg`}>
+                                  <Merge size={14} /> UNIR Y DESCARGAR
                               </button>
                           )}
                       </div>
                   )}
               </div>
 
-              {/* LISTA DE FRAGMENTOS: ESCUCHA Y DESCARGA */}
+              {/* LISTA DE FRAGMENTOS: CADA UNO CON CONTROLES INDIVIDUALES */}
               <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
                   {sections.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-700 opacity-20"><Layers size={64} className="mb-4"/><p className="text-lg font-bold uppercase tracking-widest">Listo para procesar</p></div>
+                      <div className="h-full flex flex-col items-center justify-center text-slate-700 opacity-20"><Layers size={64} className="mb-4"/><p className="text-lg font-bold uppercase tracking-widest">Esperando contenido</p></div>
                   ) : (
                       sections.map((section) => (
                           <div key={section.id} className={`group relative rounded-xl border transition-all ${selectedSectionIds.has(section.id) ? 'bg-slate-800 border-indigo-500/50' : 'bg-slate-800/30 border-slate-700/50 hover:border-slate-600'}`}>
@@ -400,14 +419,14 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                       <div className="flex-1 min-w-0">
                                           {editingId === section.id ? (
                                               <div className="space-y-2 py-2">
-                                                  <input value={editBuffer.title} onChange={e => setEditBuffer(b => ({...b, title: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-xs text-white font-bold" />
-                                                  <textarea value={editBuffer.content} onChange={e => setEditBuffer(b => ({...b, content: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-[11px] text-slate-400 h-20" />
+                                                  <input value={editBuffer.title} onChange={e => setEditBuffer(b => ({...b, title: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-xs text-white font-bold outline-none" />
+                                                  <textarea value={editBuffer.content} onChange={e => setEditBuffer(b => ({...b, content: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-[11px] text-slate-400 h-20 outline-none" />
                                                   <div className="flex justify-end gap-2">
                                                       <button onClick={() => setEditingId(null)} className="px-2 py-1 text-[10px] text-slate-500 font-bold">Descartar</button>
                                                       <button onClick={() => {
                                                           setSections(prev => prev.map(s => s.id === editingId ? { ...s, title: editBuffer.title, content: editBuffer.content, charCount: editBuffer.content.length, status: 'idle', audioUrl: undefined } : s));
                                                           setEditingId(null);
-                                                      }} className={`px-3 py-1 text-[10px] rounded font-bold text-white ${themeBg}`}>Guardar</button>
+                                                      }} className={`px-3 py-1 text-[10px] rounded font-bold text-white ${themeBg}`}>Guardar Cambios</button>
                                                   </div>
                                               </div>
                                           ) : (
@@ -424,13 +443,13 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                                       <div className="flex items-center gap-1 text-[9px] text-slate-500 bg-slate-900/50 px-1.5 py-0.5 rounded border border-slate-800">
                                                           <Calculator size={10} /> {section.charCount} chars
                                                       </div>
-                                                      <div className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border border-slate-800 ${section.status === 'completed' ? 'text-green-400 bg-green-900/10' : 'text-slate-500 bg-slate-900/50'}`}>
+                                                      <div className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border border-slate-800 ${section.status === 'completed' ? 'text-green-400 bg-green-900/10 border-green-500/20' : 'text-slate-500 bg-slate-900/50'}`}>
                                                           <Clock size={10} /> 
                                                           {section.status === 'completed' ? formatTime(section.actualDuration || 0) : `Est: ${formatTime(section.estimatedDuration)}`}
                                                       </div>
                                                       {section.status === 'completed' && section.generationTime && (
                                                           <div className="flex items-center gap-1 text-[9px] text-amber-400 bg-amber-900/10 px-1.5 py-0.5 rounded border border-amber-900/20">
-                                                              <Activity size={10} /> {section.generationTime.toFixed(1)}s (Latencia IA)
+                                                              <Activity size={10} /> {section.generationTime.toFixed(1)}s (Latencia)
                                                           </div>
                                                       )}
                                                   </div>
@@ -440,30 +459,30 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
                                       <div className="flex items-center gap-2">
                                           {section.status === 'idle' && (
-                                              <button onClick={() => startGeneration(section.id)} className={`p-2 rounded-lg text-white shadow-lg ${themeBg} hover:scale-105 active:scale-95 transition-transform`}>
+                                              <button onClick={() => startGeneration(section.id)} className={`p-2 rounded-lg text-white shadow-lg ${themeBg} hover:scale-110 active:scale-95 transition-all`}>
                                                   <Zap size={14} fill="currentColor" />
                                               </button>
                                           )}
                                           
                                           {section.status === 'generating' && (
                                               <div className="p-2 bg-amber-500/10 rounded-lg text-amber-500 border border-amber-500/20">
-                                                  <Loader2 size={14} className="animate-spin" />
+                                                  <Loader2 size={16} className="animate-spin" />
                                               </div>
                                           )}
 
                                           {section.status === 'completed' && (
-                                              <div className="flex items-center gap-1.5">
+                                              <div className="flex items-center gap-1.5 animate-in zoom-in-95">
                                                   <button 
                                                       onClick={() => onSendToPlayer(section.audioUrl!, section.title, section.blob)} 
-                                                      className="p-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors"
-                                                      title="Escuchar en Reproductor"
+                                                      className="p-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors shadow-md"
+                                                      title="Escuchar"
                                                   >
                                                       <PlayCircle size={18} />
                                                   </button>
                                                   <button 
                                                       onClick={() => handleDownloadSection(section)} 
-                                                      className="p-2 bg-green-600/20 text-green-400 rounded-lg border border-green-500/30 hover:bg-green-600/30 transition-colors"
-                                                      title="Descargar Audio Individual"
+                                                      className="p-2 bg-green-600/20 text-green-400 rounded-lg border border-green-500/30 hover:bg-green-600 hover:text-white transition-all shadow-md"
+                                                      title="Descargar"
                                                   >
                                                       <Download size={16} />
                                                   </button>
@@ -472,13 +491,13 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
                                       </div>
                                   </div>
 
-                                  {/* BARRA DE PROGRESO DINÁMICA */}
+                                  {/* BARRA DE PROGRESO INDIVIDUAL */}
                                   {(section.status === 'generating' || section.progress > 0) && (
-                                      <div className="mt-2 h-1 w-full bg-slate-900 rounded-full overflow-hidden">
+                                      <div className="mt-2 h-1 w-full bg-slate-950 rounded-full overflow-hidden">
                                           <div 
                                               className={`h-full transition-all duration-700 ease-out ${
                                                 section.status === 'completed' 
-                                                ? 'bg-green-500' 
+                                                ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.4)]' 
                                                 : isPaused ? 'bg-amber-600 animate-pulse' : 'bg-indigo-500 animate-pulse'
                                               }`}
                                               style={{ width: `${section.progress}%` }}
