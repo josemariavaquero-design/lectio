@@ -6,12 +6,12 @@ import {
   AlertCircle, FileAudio, Split, Merge, Pause, Square, Play, Save, 
   X, ChevronDown, ChevronUp, Timer, Calculator, Coins, Rocket, 
   Hourglass, StopCircle, CheckSquare, Check, XCircle, Info, Activity,
-  RotateCcw, PlaySquare
+  RotateCcw, PlaySquare, Volume2, MousePointer2
 } from 'https://esm.sh/lucide-react@0.463.0';
 import { VOICES_ES, VOICES_EN, MAX_CHARS_PER_CHUNK, UI_TEXT, SAMPLE_RATE } from '../constants';
 import { VoiceOption, GenerationSettings, Language, ProjectSection } from '../types';
 import VoiceCard from './VoiceCard';
-import { generateSpeechFromText, optimizeTextForSpeech } from '../services/geminiService';
+import { generateSpeechFromText } from '../services/geminiService';
 import { mergeWavBlobs } from '../utils/audioUtils';
 
 interface TTSModuleProps {
@@ -37,9 +37,10 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   const [sections, setSections] = useState<ProjectSection[]>([]);
   const [selectedSectionIds, setSelectedSectionIds] = useState<Set<string>>(new Set());
   
-  // Estados de control
+  // Estados de control de flujo
   const [isReadingFile, setIsReadingFile] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(true);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   
@@ -60,15 +61,13 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Estadísticas globales actualizadas por cada cambio en secciones
+  // Estadísticas globales del proyecto
   const stats = useMemo(() => {
     const totalChars = sections.reduce((acc, s) => acc + s.charCount, 0);
     const totalActualDuration = sections.reduce((acc, s) => acc + (s.actualDuration || 0), 0);
     const totalEstDuration = sections.reduce((acc, s) => acc + s.estimatedDuration, 0);
-    const totalGenTime = sections.reduce((acc, s) => acc + (s.generationTime || 0), 0);
     const completedCount = sections.filter(s => s.status === 'completed').length;
-    
-    return { totalChars, totalEstDuration, totalActualDuration, totalGenTime, completedCount };
+    return { totalChars, totalEstDuration, totalActualDuration, completedCount };
   }, [sections]);
 
   useEffect(() => {
@@ -79,8 +78,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
   }, [language]);
 
   const handleReset = () => {
-    if (window.confirm(language === 'es' ? "¿Deseas borrar todo el proyecto actual?" : "Do you want to clear current project?")) {
-        // Limpiar URLs de audio para liberar memoria
+    if (window.confirm(language === 'es' ? "¿Borrar todo el progreso y empezar de nuevo?" : "Clear all progress and start over?")) {
         sections.forEach(s => s.audioUrl && URL.revokeObjectURL(s.audioUrl));
         setProjectTitle('');
         setFullText('');
@@ -93,37 +91,51 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     }
   };
 
-  const handleFileUpload = async (file: File) => {
-    const fileName = file.name.replace(/\.[^/.]+$/, "");
-    setProjectTitle(fileName);
+  const processFile = async (file: File): Promise<string> => {
+    if (file.type === "application/pdf") {
+        const pdfjs = await import('https://esm.sh/pdfjs-dist@4.8.69');
+        pdfjs.GlobalWorkerOptions.workerSrc = `https://esm.sh/pdfjs-dist@4.8.69/build/pdf.worker.mjs`;
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+        let extractedText = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            extractedText += textContent.items.map((item: any) => item.str).join(' ') + "\n";
+        }
+        return extractedText;
+    } else {
+        return await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target?.result as string);
+            reader.readAsText(file);
+        });
+    }
+  };
+
+  const handleFilesUpload = async (files: FileList | File[]) => {
+    if (!files.length) return;
+    
     setIsReadingFile(true);
+    let combinedText = fullText ? fullText + "\n\n" : "";
+    
+    // Si no hay título, tomamos el del primer archivo
+    if (!projectTitle) {
+        setProjectTitle(files[0].name.replace(/\.[^/.]+$/, ""));
+    } else if (files.length > 1) {
+        setProjectTitle(prev => prev + " (y otros)");
+    }
 
     try {
-        let text = "";
-        if (file.type === "application/pdf") {
-            const pdfjs = await import('https://esm.sh/pdfjs-dist@4.8.69');
-            pdfjs.GlobalWorkerOptions.workerSrc = `https://esm.sh/pdfjs-dist@4.8.69/build/pdf.worker.mjs`;
-            const arrayBuffer = await file.arrayBuffer();
-            const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-            let extractedText = "";
-            for (let i = 1; i <= pdf.numPages; i++) {
-                const page = await pdf.getPage(i);
-                const textContent = await page.getTextContent();
-                extractedText += textContent.items.map((item: any) => item.str).join(' ') + "\n";
-            }
-            text = extractedText;
-        } else {
-            text = await new Promise<string>((resolve) => {
-                const reader = new FileReader();
-                reader.onload = (e) => resolve(e.target?.result as string);
-                reader.readAsText(file);
-            });
+        for (let i = 0; i < files.length; i++) {
+            const text = await processFile(files[i]);
+            combinedText += `\n--- Archivo: ${files[i].name} ---\n` + text + "\n";
         }
-        setFullText(text);
-        parseAndSetSections(text, fileName);
+        setFullText(combinedText);
+        parseAndSetSections(combinedText, projectTitle || files[0].name);
     } catch (error) {
-        console.error("Error al leer archivo:", error);
-        alert(language === 'es' ? "Error crítico al procesar el archivo." : "Critical error processing file.");
+        console.error("Error al leer archivos:", error);
+        alert("Error al procesar uno o más archivos.");
     } finally {
         setIsReadingFile(false);
     }
@@ -137,7 +149,7 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
           foundSections.push({
               id,
               index: foundSections.length,
-              title,
+              title: title.length > 50 ? title.substring(0, 47) + "..." : title,
               content: content.trim(),
               status: 'idle',
               progress: 0,
@@ -147,14 +159,16 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       };
 
       const lines = text.split('\n');
-      let currentTitle = "Inicio";
+      let currentTitle = "Fragmento 1";
       let currentBuffer: string[] = [];
-      const chapterRegex = /^(#{1,3}\s+|Cap[íi]tulo\s+|Chapter\s+|Parte\s+|Documento\s+)(.+)/i;
+      
+      // Regex mejorado para detectar separadores de archivos o capítulos
+      const chapterRegex = /^(#{1,3}\s+|Cap[íi]tulo\s+|Chapter\s+|Parte\s+|---\sArchivo:\s)(.+)/i;
 
       lines.forEach(line => {
           if (chapterRegex.test(line)) {
               if (currentBuffer.length > 0) pushSection(currentTitle, currentBuffer.join('\n'));
-              currentTitle = line.trim();
+              currentTitle = line.trim().replace(/^--- Archivo:\s/i, '');
               currentBuffer = [];
           } else {
               currentBuffer.push(line);
@@ -164,14 +178,14 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
       if (foundSections.length === 0 && text.trim()) pushSection(titleBase, text);
 
       setSections(foundSections);
-      setSelectedSectionIds(new Set());
+      setSelectedSectionIds(new Set(foundSections.map(s => s.id)));
   };
 
   const startGeneration = async (sectionId: string): Promise<boolean> => {
     if (!apiKey) { setShowKeyModal(true); return false; }
     
     const startTime = Date.now();
-    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'generating', progress: 15 } : s));
+    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'generating', progress: 30 } : s));
 
     try {
         const section = sections.find(s => s.id === sectionId);
@@ -193,9 +207,15 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
         } : s));
         return true;
     } catch (error: any) {
-        setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'error', currentStep: error.message, progress: 0 } : s));
+        setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: 'error', progress: 0, currentStep: error.message } : s));
         return false;
     }
+  };
+
+  const stopGeneration = () => {
+    stopSignalRef.current = true;
+    setIsBatchGenerating(false);
+    setIsPaused(false);
   };
 
   const handleBatchGenerate = async () => {
@@ -206,13 +226,11 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     stopSignalRef.current = false;
     pauseSignalRef.current = false;
     
-    // Usamos una copia para evitar problemas de referencia durante el bucle
-    const pendingIds = Array.from(selectedSectionIds);
+    const idsToProcess = Array.from(selectedSectionIds) as string[];
     
-    for (const sectionId of pendingIds) {
+    for (const sectionId of idsToProcess) {
         if (stopSignalRef.current) break;
         
-        // Control de pausa
         while (pauseSignalRef.current) {
             await new Promise(r => setTimeout(r, 500));
             if (stopSignalRef.current) break;
@@ -222,7 +240,6 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
         const section = sections.find(s => s.id === sectionId);
         if (section && section.status !== 'completed') {
             await startGeneration(sectionId);
-            // Delay anti-throttling para cuentas gratis
             if (!settings.isPaid) await new Promise(r => setTimeout(r, 1500));
         }
     }
@@ -231,17 +248,14 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     setIsPaused(false);
   };
 
-  const togglePause = () => {
-      const newState = !isPaused;
-      setIsPaused(newState);
-      pauseSignalRef.current = newState;
-  };
-
-  const stopGeneration = () => {
-      stopSignalRef.current = true;
-      setIsBatchGenerating(false);
-      setIsPaused(false);
-      pauseSignalRef.current = false;
+  const handleDownloadSection = (section: ProjectSection) => {
+      if (!section.audioUrl) return;
+      const link = document.createElement('a');
+      link.href = section.audioUrl;
+      const cleanTitle = projectTitle.trim() || 'Audio';
+      const cleanSection = section.title.replace(/[^\w\s-]/gi, '').trim();
+      link.download = `${cleanTitle} - ${cleanSection}.wav`;
+      link.click();
   };
 
   const formatTime = (seconds: number) => {
@@ -250,267 +264,270 @@ const TextToSpeechModule: React.FC<TTSModuleProps> = ({
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  const handleDownloadSection = (section: ProjectSection) => {
-      if (!section.audioUrl) return;
-      const link = document.createElement('a');
-      link.href = section.audioUrl;
-      // Nombre de archivo con el título del proyecto
-      const cleanTitle = projectTitle || 'audio';
-      const cleanSection = section.title.replace(/[^\w\s-]/gi, '').trim();
-      link.download = `${cleanTitle} - ${cleanSection}.wav`;
-      link.click();
+  // Handlers para Drag & Drop
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files) {
+        handleFilesUpload(e.dataTransfer.files);
+    }
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full animate-in fade-in duration-500">
+    <div className="flex flex-col space-y-6 h-full animate-in fade-in duration-500">
       
-      {/* PANEL IZQUIERDO: TEXTO E IMPORTACIÓN */}
-      <div className="lg:col-span-5 flex flex-col space-y-6">
-         <div className="flex items-center gap-4">
-             <div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 flex items-center gap-3">
-                 <FileText size={18} className="text-slate-500" />
-                 <input type="text" value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)} placeholder={t.projectTitlePlaceholder} className="bg-transparent font-semibold text-white outline-none w-full" />
-             </div>
-             
-             <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-2 px-5 py-3 rounded-xl font-bold transition-all shadow-lg ${themeBg} text-white hover:opacity-90 active:scale-95 shrink-0`}>
-                 {isReadingFile ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
-                 <span className="text-xs">Subir Documento</span>
-             </button>
-             <input type="file" ref={fileInputRef} className="hidden" accept=".txt,.md,.pdf" onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}/>
-         </div>
-
-         <div className="flex-1 bg-slate-800/20 rounded-2xl border-2 border-dashed border-slate-800 relative flex flex-col overflow-hidden">
-             <textarea value={fullText} onChange={(e) => setFullText(e.target.value)} placeholder={t.placeholderText} className="w-full h-full bg-transparent p-6 resize-none outline-none text-slate-300 custom-scrollbar font-light leading-relaxed text-sm" />
-             
-             <div className="absolute bottom-4 left-4 flex gap-2">
-                <button onClick={handleReset} className="bg-slate-900/90 px-3 py-1.5 rounded-lg border border-red-500/50 text-[10px] text-red-400 font-bold flex items-center gap-1.5 hover:bg-red-500 hover:text-white transition-all">
-                    <RotateCcw size={12} /> REINICIAR PROYECTO
-                </button>
-             </div>
-
-             {fullText.length > 0 && (
-                <div className="absolute bottom-4 right-4 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-700 text-[10px] text-slate-400 font-mono">
-                   {fullText.length.toLocaleString()} CARACTERES
-                </div>
-             )}
-         </div>
-      </div>
-
-      {/* PANEL DERECHO: PROGRESO Y CONTROLES */}
-      <div className="lg:col-span-7 flex flex-col space-y-6">
-          
-          <div className="bg-slate-800/40 rounded-xl border border-slate-700 overflow-hidden">
-             <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className="w-full p-4 flex items-center justify-between hover:bg-slate-800/50">
-                 <h3 className="text-xs font-bold text-white flex items-center gap-2 uppercase tracking-widest"><Settings2 size={14} className={themeText} /> Modulación de Voz</h3>
-                 {isSettingsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-             </button>
-             {isSettingsOpen && (
-                 <div className="p-4 pt-0 space-y-4 animate-in slide-in-from-top-2">
-                     <div className="flex overflow-x-auto gap-3 pb-2 custom-scrollbar">
-                         {VOICES.map((voice) => (
-                             <div key={voice.id} className="min-w-[180px]"><VoiceCard voice={voice} isSelected={selectedVoice.id === voice.id} onSelect={setSelectedVoice} apiKey={apiKey} language={language} settings={settings} /></div>
-                         ))}
-                     </div>
-                     <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <div className="flex justify-between text-[10px] text-slate-400 uppercase font-bold"><span>Ritmo</span><span className={themeText}>{settings.speed}x</span></div>
-                            <input type="range" min="0.5" max="2.0" step="0.1" value={settings.speed} onChange={(e) => setSettings(s => ({...s, speed: parseFloat(e.target.value)}))} className="w-full h-1 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-indigo-500" />
-                        </div>
-                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800 flex items-center justify-between">
-                            <div className="text-[10px] font-bold text-slate-500 uppercase">Acelerar (Turbo)</div>
-                            <button onClick={() => setSettings(s => ({...s, isPaid: !s.isPaid}))} className={`w-8 h-4 rounded-full relative transition-colors ${settings.isPaid ? 'bg-amber-500' : 'bg-slate-700'}`}>
-                                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${settings.isPaid ? 'translate-x-4' : ''}`}></div>
-                            </button>
-                        </div>
-                     </div>
-                 </div>
-             )}
-          </div>
-
-          <div className="flex-1 bg-slate-900/50 rounded-2xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
-              
-              {/* HEADER DE CONTROL: ESTADÍSTICAS Y ACCIONES DE FLUJO */}
-              <div className="p-4 bg-slate-950/50 border-b border-slate-800">
-                  <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-white flex items-center gap-2 text-sm"><FolderOpen size={16} className="text-amber-400" /> Cola de Generación</h3>
-                      <div className="flex items-center gap-3">
-                        <button onClick={() => setSelectedSectionIds(new Set(sections.map(s=>s.id)))} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter transition-colors">Marcar Todos</button>
-                        <button onClick={() => setSelectedSectionIds(new Set())} className="text-[10px] text-slate-500 hover:text-white uppercase font-bold tracking-tighter transition-colors">Limpiar</button>
-                      </div>
+      {/* SECCIÓN SUPERIOR: DATOS Y TEXTO */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="flex flex-col space-y-4">
+              <div className="flex items-center gap-3">
+                  <div className="flex-1 bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50 flex items-center gap-3">
+                      <FileText size={20} className="text-slate-500" />
+                      <input type="text" value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)} placeholder={t.projectTitlePlaceholder} className="bg-transparent font-bold text-white outline-none w-full" />
                   </div>
+                  <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-2 px-6 py-4 rounded-2xl font-bold transition-all shadow-xl ${themeBg} text-white hover:opacity-90 active:scale-95 shrink-0`}>
+                      {isReadingFile ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
+                      <span className="hidden sm:inline">Importar Archivos</span>
+                  </button>
+                  <input type="file" ref={fileInputRef} className="hidden" accept=".txt,.md,.pdf" multiple onChange={(e) => e.target.files && handleFilesUpload(e.target.files)}/>
+              </div>
 
-                  {sections.length > 0 && (
-                    <div className="grid grid-cols-4 gap-2 mb-4">
-                        <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Caracteres</span>
-                            <span className="text-xs font-mono text-white">{stats.totalChars.toLocaleString()}</span>
-                        </div>
-                        <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Audio Real</span>
-                            <span className="text-xs font-mono text-indigo-400">{formatTime(stats.totalActualDuration || stats.totalEstDuration)}</span>
-                        </div>
-                        <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Progreso</span>
-                            <span className="text-xs font-mono text-green-400">{stats.completedCount}/{sections.length}</span>
-                        </div>
-                        <div className="bg-slate-800/40 p-2 rounded-lg border border-slate-700/50 flex flex-col">
-                            <span className="text-[8px] text-slate-500 uppercase font-bold">Tiempo IA</span>
-                            <span className="text-xs font-mono text-amber-400">{stats.totalGenTime.toFixed(1)}s</span>
+              <div 
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`flex-1 rounded-2xl border-2 border-dashed relative flex flex-col min-h-[400px] overflow-hidden group transition-all duration-300 ${isDragging ? 'border-indigo-500 bg-indigo-500/10 scale-[1.01]' : 'border-slate-800 bg-slate-800/20'}`}
+              >
+                  {isDragging && (
+                    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-indigo-600/20 backdrop-blur-sm animate-pulse">
+                        <MousePointer2 size={64} className="text-white mb-4" />
+                        <p className="text-xl font-black text-white uppercase tracking-widest">Suelta para importar</p>
+                    </div>
+                  )}
+
+                  <textarea value={fullText} onChange={(e) => setFullText(e.target.value)} placeholder={t.placeholderText} className="w-full h-full bg-transparent p-6 resize-none outline-none text-slate-300 custom-scrollbar font-light leading-relaxed text-sm" />
+                  
+                  {isReadingFile && (
+                    <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm">
+                        <div className="flex flex-col items-center gap-4">
+                            <Loader2 size={48} className="animate-spin text-indigo-400" />
+                            <p className="text-xs font-bold text-white uppercase tracking-widest">Analizando Documentos...</p>
                         </div>
                     </div>
                   )}
 
-                  {selectedSectionIds.size > 0 && (
-                      <div className="flex gap-2 animate-in slide-in-from-top-2 pt-2 border-t border-slate-800">
-                          {!isBatchGenerating ? (
-                              <button onClick={handleBatchGenerate} className="flex-1 flex items-center justify-center gap-2 py-3 bg-green-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-green-900/30 active:scale-95 transition-all">
-                                  <Zap size={14} fill="currentColor" /> LANZAR GENERACIÓN ({selectedSectionIds.size})
-                              </button>
-                          ) : (
-                              <div className="flex-1 flex gap-2">
-                                  <button onClick={togglePause} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all shadow-lg ${isPaused ? 'bg-indigo-600 animate-pulse text-white' : 'bg-amber-600 text-white'}`}>
-                                      {isPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
-                                      {isPaused ? 'REANUDAR PROCESO' : 'PAUSAR COLA'}
-                                  </button>
-                                  <button onClick={stopGeneration} className="px-6 flex items-center justify-center gap-2 py-3 bg-red-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg hover:bg-red-500">
-                                      <StopCircle size={14} /> DETENER
-                                  </button>
+                  {fullText.length > 0 && (
+                      <div className="absolute bottom-4 right-4 bg-slate-900/90 px-3 py-1.5 rounded-full border border-slate-700 text-[10px] text-slate-400 font-mono tracking-widest">
+                        {fullText.length.toLocaleString()} CARACTERES
+                      </div>
+                  )}
+              </div>
+          </div>
+
+          <div className="flex flex-col space-y-4">
+              {/* CONFIGURACIÓN DE VOZ */}
+              <div className="bg-slate-800/40 rounded-2xl border border-slate-700 overflow-hidden">
+                  <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className="w-full p-4 flex items-center justify-between hover:bg-slate-800/50 transition-colors">
+                      <h3 className="text-xs font-black text-white flex items-center gap-2 uppercase tracking-[0.2em]"><Settings2 size={16} className={themeText} /> Modulación y Estilo</h3>
+                      {isSettingsOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                  </button>
+                  {isSettingsOpen && (
+                      <div className="p-5 pt-0 space-y-6 animate-in slide-in-from-top-2">
+                          <div className="flex overflow-x-auto gap-3 pb-4 custom-scrollbar">
+                              {VOICES.map((voice) => (
+                                  <div key={voice.id} className="min-w-[200px]"><VoiceCard voice={voice} isSelected={selectedVoice.id === voice.id} onSelect={setSelectedVoice} apiKey={apiKey} language={language} settings={settings} /></div>
+                              ))}
+                          </div>
+                          <div className="grid grid-cols-2 gap-6">
+                              <div className="space-y-3">
+                                  <div className="flex justify-between text-[10px] text-slate-500 uppercase font-black"><span>Velocidad de Lectura</span><span className={themeText}>{settings.speed}x</span></div>
+                                  <input type="range" min="0.5" max="2.0" step="0.1" value={settings.speed} onChange={(e) => setSettings(s => ({...s, speed: parseFloat(e.target.value)}))} className="w-full h-1.5 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-indigo-500" />
                               </div>
-                          )}
-                          
-                          {!isBatchGenerating && stats.completedCount > 1 && (
-                              <button onClick={() => {
-                                  const blobs = sections.filter(s => selectedSectionIds.has(s.id) && s.blob).map(s => s.blob!);
-                                  if (blobs.length < 2) return alert("Debes generar al menos 2 audios para unir.");
-                                  mergeWavBlobs(blobs).then(merged => {
-                                      const url = URL.createObjectURL(merged);
-                                      onSendToPlayer(url, `${projectTitle} - Completo`, merged);
-                                      const link = document.createElement('a');
-                                      link.href = url;
-                                      link.download = `${projectTitle} - Completo.wav`;
-                                      link.click();
-                                  });
-                              }} className={`px-4 py-3 ${themeBg} text-white rounded-xl text-xs font-bold flex items-center gap-2 hover:opacity-90 shadow-lg`}>
-                                  <Merge size={14} /> UNIR Y DESCARGAR
-                              </button>
-                          )}
+                              <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800 flex items-center justify-between">
+                                  <div className="flex flex-col"><span className="text-[10px] font-black text-slate-500 uppercase">Modo Turbo</span><span className="text-[9px] text-slate-600">Sin esperas (Para API de pago)</span></div>
+                                  <button onClick={() => setSettings(s => ({...s, isPaid: !s.isPaid}))} className={`w-10 h-5 rounded-full relative transition-colors ${settings.isPaid ? 'bg-amber-500' : 'bg-slate-700'}`}><div className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${settings.isPaid ? 'translate-x-5' : ''}`}></div></button>
+                              </div>
+                          </div>
                       </div>
                   )}
               </div>
 
-              {/* LISTA DE FRAGMENTOS: CADA UNO CON CONTROLES INDIVIDUALES */}
-              <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
-                  {sections.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-700 opacity-20"><Layers size={64} className="mb-4"/><p className="text-lg font-bold uppercase tracking-widest">Esperando contenido</p></div>
-                  ) : (
-                      sections.map((section) => (
-                          <div key={section.id} className={`group relative rounded-xl border transition-all ${selectedSectionIds.has(section.id) ? 'bg-slate-800 border-indigo-500/50' : 'bg-slate-800/30 border-slate-700/50 hover:border-slate-600'}`}>
-                              
-                              <div className="p-3">
-                                  <div className="flex items-center gap-3">
-                                      <button onClick={() => {
-                                          const next = new Set(selectedSectionIds);
-                                          if (next.has(section.id)) next.delete(section.id); else next.add(section.id);
-                                          setSelectedSectionIds(next);
-                                      }} className={`shrink-0 ${selectedSectionIds.has(section.id) ? 'text-indigo-400' : 'text-slate-600 hover:text-slate-400'}`}>
-                                          {selectedSectionIds.has(section.id) ? <CheckSquare size={20} fill="currentColor" /> : <Square size={20} />}
-                                      </button>
+              {/* DASHBOARD DE PROGRESO */}
+              <div className="flex-1 bg-slate-900/50 rounded-2xl border border-slate-800 flex flex-col overflow-hidden shadow-2xl min-h-[300px]">
+                  <div className="p-4 bg-slate-950/50 border-b border-slate-800 flex items-center justify-between">
+                      <div className="flex items-center gap-2"><FolderOpen size={18} className="text-amber-400" /><h3 className="font-bold text-white text-sm">Gestión del Proyecto</h3></div>
+                      <div className="flex gap-4">
+                        <button onClick={() => setSelectedSectionIds(new Set(sections.map(s=>s.id)))} className="text-[10px] text-slate-500 hover:text-white uppercase font-black transition-colors">Seleccionar Todo</button>
+                        <button onClick={() => setSelectedSectionIds(new Set())} className="text-[10px] text-slate-500 hover:text-white uppercase font-black transition-colors">Limpiar</button>
+                      </div>
+                  </div>
 
-                                      <div className="flex-1 min-w-0">
-                                          {editingId === section.id ? (
-                                              <div className="space-y-2 py-2">
-                                                  <input value={editBuffer.title} onChange={e => setEditBuffer(b => ({...b, title: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-xs text-white font-bold outline-none" />
-                                                  <textarea value={editBuffer.content} onChange={e => setEditBuffer(b => ({...b, content: e.target.value}))} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-[11px] text-slate-400 h-20 outline-none" />
-                                                  <div className="flex justify-end gap-2">
-                                                      <button onClick={() => setEditingId(null)} className="px-2 py-1 text-[10px] text-slate-500 font-bold">Descartar</button>
-                                                      <button onClick={() => {
-                                                          setSections(prev => prev.map(s => s.id === editingId ? { ...s, title: editBuffer.title, content: editBuffer.content, charCount: editBuffer.content.length, status: 'idle', audioUrl: undefined } : s));
-                                                          setEditingId(null);
-                                                      }} className={`px-3 py-1 text-[10px] rounded font-bold text-white ${themeBg}`}>Guardar Cambios</button>
-                                                  </div>
-                                              </div>
-                                          ) : (
-                                              <>
-                                                  <div className="flex items-center gap-2">
-                                                      <h4 className="font-semibold text-slate-200 text-xs truncate">{section.title}</h4>
-                                                      <button onClick={() => {
-                                                          setEditingId(section.id);
-                                                          setEditBuffer({ title: section.title, content: section.content });
-                                                      }} className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-white transition-opacity"><Edit2 size={10}/></button>
-                                                  </div>
-                                                  
-                                                  <div className="flex items-center gap-2 mt-1">
-                                                      <div className="flex items-center gap-1 text-[9px] text-slate-500 bg-slate-900/50 px-1.5 py-0.5 rounded border border-slate-800">
-                                                          <Calculator size={10} /> {section.charCount} chars
-                                                      </div>
-                                                      <div className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border border-slate-800 ${section.status === 'completed' ? 'text-green-400 bg-green-900/10 border-green-500/20' : 'text-slate-500 bg-slate-900/50'}`}>
-                                                          <Clock size={10} /> 
-                                                          {section.status === 'completed' ? formatTime(section.actualDuration || 0) : `Est: ${formatTime(section.estimatedDuration)}`}
-                                                      </div>
-                                                      {section.status === 'completed' && section.generationTime && (
-                                                          <div className="flex items-center gap-1 text-[9px] text-amber-400 bg-amber-900/10 px-1.5 py-0.5 rounded border border-amber-900/20">
-                                                              <Activity size={10} /> {section.generationTime.toFixed(1)}s (Latencia)
-                                                          </div>
-                                                      )}
-                                                  </div>
-                                              </>
-                                          )}
-                                      </div>
+                  {/* CONTROLES DE FLUJO MAESTROS */}
+                  <div className="p-4 border-b border-slate-800 grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-900/80">
+                      <button 
+                        onClick={handleBatchGenerate} 
+                        disabled={selectedSectionIds.size === 0 || isBatchGenerating}
+                        className={`col-span-2 flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black transition-all shadow-lg ${isBatchGenerating ? 'bg-slate-800 text-slate-600' : 'bg-green-600 text-white shadow-green-900/20 active:scale-95'}`}
+                      >
+                        <Zap size={14} fill="currentColor" /> INICIAR GENERACIÓN ({selectedSectionIds.size})
+                      </button>
+                      
+                      {isBatchGenerating ? (
+                        <>
+                          <button onClick={() => { setIsPaused(!isPaused); pauseSignalRef.current = !isPaused; }} className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black transition-all ${isPaused ? 'bg-indigo-600 animate-pulse text-white' : 'bg-amber-600 text-white shadow-amber-900/20'}`}>
+                            {isPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />} {isPaused ? 'REANUDAR' : 'PAUSAR'}
+                          </button>
+                          <button onClick={stopGeneration} className="flex items-center justify-center gap-2 py-3 bg-red-600 text-white rounded-xl text-xs font-black shadow-lg shadow-red-900/20 hover:bg-red-500">
+                            <StopCircle size={14} /> PARAR
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={handleReset} className="flex items-center justify-center gap-2 py-3 bg-slate-800 text-red-400 rounded-xl text-xs font-black border border-red-500/20 hover:bg-red-900/20 transition-all">
+                            <RotateCcw size={14} /> REINICIAR
+                          </button>
+                          <button 
+                            disabled={stats.completedCount < 2}
+                            onClick={() => {
+                                const blobs = sections.filter(s => selectedSectionIds.has(s.id) && s.blob).map(s => s.blob!);
+                                mergeWavBlobs(blobs).then(merged => {
+                                    const url = URL.createObjectURL(merged);
+                                    onSendToPlayer(url, `${projectTitle} - Completo`, merged);
+                                    const link = document.createElement('a');
+                                    link.href = url;
+                                    link.download = `${projectTitle} - Completo.wav`;
+                                    link.click();
+                                });
+                            }}
+                            className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black transition-all ${stats.completedCount < 2 ? 'bg-slate-800 text-slate-600' : 'bg-indigo-600 text-white shadow-indigo-900/20 hover:bg-indigo-500'}`}
+                          >
+                            <Merge size={14} /> UNIR TODO
+                          </button>
+                        </>
+                      )}
+                  </div>
 
+                  {/* LISTADO DE FRAGMENTOS */}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                      {sections.length === 0 ? (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-800 text-center px-8">
+                            <Layers size={64} className="mb-4 opacity-10"/>
+                            <p className="text-sm font-black uppercase tracking-[0.3em] opacity-20 mb-2">Proyecto Vacío</p>
+                            <p className="text-[10px] text-slate-600 uppercase font-bold">Arrastra aquí tus archivos PDF, TXT o Markdown para empezar</p>
+                        </div>
+                      ) : (
+                        sections.map((section) => (
+                          <div key={section.id} className={`group relative rounded-xl border-2 transition-all p-4 ${selectedSectionIds.has(section.id) ? 'bg-slate-800/80 border-indigo-500/50 shadow-xl' : 'bg-slate-800/20 border-slate-800/50 hover:border-slate-700'}`}>
+                              <div className="flex items-center gap-4">
+                                  <button onClick={() => {
+                                      const next = new Set(selectedSectionIds);
+                                      if (next.has(section.id)) next.delete(section.id); else next.add(section.id);
+                                      setSelectedSectionIds(next);
+                                  }} className={`shrink-0 ${selectedSectionIds.has(section.id) ? 'text-indigo-400' : 'text-slate-600 hover:text-slate-400'}`}>
+                                      {selectedSectionIds.has(section.id) ? <CheckSquare size={22} fill="currentColor" /> : <Square size={22} />}
+                                  </button>
+
+                                  <div className="flex-1 min-w-0">
                                       <div className="flex items-center gap-2">
-                                          {section.status === 'idle' && (
-                                              <button onClick={() => startGeneration(section.id)} className={`p-2 rounded-lg text-white shadow-lg ${themeBg} hover:scale-110 active:scale-95 transition-all`}>
-                                                  <Zap size={14} fill="currentColor" />
-                                              </button>
-                                          )}
-                                          
-                                          {section.status === 'generating' && (
-                                              <div className="p-2 bg-amber-500/10 rounded-lg text-amber-500 border border-amber-500/20">
-                                                  <Loader2 size={16} className="animate-spin" />
-                                              </div>
-                                          )}
-
-                                          {section.status === 'completed' && (
-                                              <div className="flex items-center gap-1.5 animate-in zoom-in-95">
-                                                  <button 
-                                                      onClick={() => onSendToPlayer(section.audioUrl!, section.title, section.blob)} 
-                                                      className="p-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors shadow-md"
-                                                      title="Escuchar"
-                                                  >
-                                                      <PlayCircle size={18} />
-                                                  </button>
-                                                  <button 
-                                                      onClick={() => handleDownloadSection(section)} 
-                                                      className="p-2 bg-green-600/20 text-green-400 rounded-lg border border-green-500/30 hover:bg-green-600 hover:text-white transition-all shadow-md"
-                                                      title="Descargar"
-                                                  >
-                                                      <Download size={16} />
-                                                  </button>
-                                              </div>
-                                          )}
+                                          <h4 className="font-bold text-slate-100 text-xs truncate">{section.title}</h4>
+                                          <button onClick={() => { setEditingId(section.id); setEditBuffer({title: section.title, content: section.content}); }} className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-white transition-all"><Edit2 size={12}/></button>
+                                      </div>
+                                      <div className="flex items-center gap-3 mt-1.5 font-mono text-[9px] font-bold">
+                                          <span className="text-slate-500 flex items-center gap-1 bg-slate-900 px-2 py-0.5 rounded border border-slate-800"><Calculator size={10}/> {section.charCount} car.</span>
+                                          <span className={`flex items-center gap-1 px-2 py-0.5 rounded border ${section.status === 'completed' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-slate-900 text-slate-500 border-slate-800'}`}>
+                                              <Clock size={10}/> {section.status === 'completed' ? formatTime(section.actualDuration || 0) : `Est: ${formatTime(section.estimatedDuration)}`}
+                                          </span>
                                       </div>
                                   </div>
 
-                                  {/* BARRA DE PROGRESO INDIVIDUAL */}
-                                  {(section.status === 'generating' || section.progress > 0) && (
-                                      <div className="mt-2 h-1 w-full bg-slate-950 rounded-full overflow-hidden">
-                                          <div 
-                                              className={`h-full transition-all duration-700 ease-out ${
-                                                section.status === 'completed' 
-                                                ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.4)]' 
-                                                : isPaused ? 'bg-amber-600 animate-pulse' : 'bg-indigo-500 animate-pulse'
-                                              }`}
-                                              style={{ width: `${section.progress}%` }}
-                                          />
-                                      </div>
-                                  )}
+                                  <div className="flex items-center gap-2">
+                                      {section.status === 'idle' && (
+                                          <button onClick={() => startGeneration(section.id)} className={`p-2.5 rounded-xl text-white shadow-lg ${themeBg} hover:scale-110 active:scale-90 transition-all`}>
+                                              <Zap size={16} fill="currentColor" />
+                                          </button>
+                                      )}
+                                      {section.status === 'generating' && (
+                                          <div className="p-2.5 bg-amber-500/20 rounded-xl text-amber-500 border border-amber-500/30">
+                                              <Loader2 size={16} className="animate-spin" />
+                                          </div>
+                                      )}
+                                      {section.status === 'completed' && (
+                                          <div className="flex items-center gap-2 animate-in zoom-in-95">
+                                              <button 
+                                                onClick={() => onSendToPlayer(section.audioUrl!, section.title, section.blob)} 
+                                                className="p-2.5 bg-slate-700 text-white rounded-xl hover:bg-slate-600 shadow-md transition-all active:scale-95"
+                                                title="Escuchar"
+                                              >
+                                                <PlayCircle size={20} />
+                                              </button>
+                                              <button 
+                                                onClick={() => handleDownloadSection(section)} 
+                                                className="p-2.5 bg-green-600 text-white rounded-xl hover:bg-green-500 shadow-lg shadow-green-900/20 transition-all active:scale-95"
+                                                title="Descargar"
+                                              >
+                                                <Download size={18} />
+                                              </button>
+                                          </div>
+                                      )}
+                                  </div>
                               </div>
+
+                              {/* BARRA DE PROGRESO INDIVIDUAL */}
+                              {(section.status === 'generating' || section.progress > 0) && (
+                                  <div className="mt-3 h-1.5 w-full bg-slate-950 rounded-full overflow-hidden border border-slate-900 shadow-inner">
+                                      <div 
+                                          className={`h-full transition-all duration-700 ease-out ${
+                                            section.status === 'completed' ? 'bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)]' : isPaused ? 'bg-amber-500 animate-pulse' : 'bg-indigo-500 animate-pulse'
+                                          }`}
+                                          style={{ width: `${section.progress}%` }}
+                                      />
+                                  </div>
+                              )}
                           </div>
-                      ))
-                  )}
+                        ))
+                      )}
+                  </div>
               </div>
           </div>
       </div>
+      
+      {/* MODAL DE EDICIÓN RÁPIDA */}
+      {editingId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-in fade-in">
+           <div className="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-xl p-8 space-y-6 shadow-2xl">
+              <div className="flex justify-between items-center">
+                  <h3 className="text-xl font-black text-white uppercase tracking-widest flex items-center gap-3"><Edit2 size={24} className={themeText}/> Editar Fragmento</h3>
+                  <button onClick={() => setEditingId(null)} className="text-slate-500 hover:text-white"><X size={24}/></button>
+              </div>
+              <div className="space-y-4">
+                  <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-500 uppercase">Título de Sección</label>
+                      <input value={editBuffer.title} onChange={e => setEditBuffer(b => ({...b, title: e.target.value}))} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-white font-bold outline-none focus:border-indigo-500" />
+                  </div>
+                  <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-500 uppercase">Contenido del Texto</label>
+                      <textarea value={editBuffer.content} onChange={e => setEditBuffer(b => ({...b, content: e.target.value}))} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-300 h-60 outline-none resize-none focus:border-indigo-500 custom-scrollbar" />
+                  </div>
+              </div>
+              <div className="flex gap-4">
+                  <button onClick={() => setEditingId(null)} className="flex-1 py-4 text-slate-400 font-bold hover:bg-slate-800 rounded-2xl transition-all">Cancelar</button>
+                  <button onClick={() => {
+                      setSections(prev => prev.map(s => s.id === editingId ? { ...s, title: editBuffer.title, content: editBuffer.content, charCount: editBuffer.content.length, status: 'idle', audioUrl: undefined } : s));
+                      setEditingId(null);
+                  }} className={`flex-1 py-4 ${themeBg} text-white font-black rounded-2xl shadow-xl active:scale-95 transition-all`}>GUARDAR CAMBIOS</button>
+              </div>
+           </div>
+        </div>
+      )}
     </div>
   );
 };
